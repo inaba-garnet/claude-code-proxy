@@ -5,10 +5,11 @@ import { translateRequest } from "./translate/request.ts"
 import { translateStream } from "./translate/stream.ts"
 import { accumulateResponse, UpstreamStreamError } from "./translate/accumulate.ts"
 import { CodexError, postCodex } from "./codex/client.ts"
-import { countTokens } from "./count-tokens.ts"
+import { countTokens, countTranslatedTokens } from "./count-tokens.ts"
 
 const log = createLogger("server")
 const VERBOSE = !!process.env.CCP_LOG_VERBOSE
+const LOG_COMPACTION = !!process.env.CCP_LOG_COMPACTION
 
 export interface ServeOptions {
   port: number
@@ -52,6 +53,16 @@ async function route(req: Request, url: URL, reqId: string): Promise<Response> {
     const body = (await req.json()) as AnthropicRequest
     const tokens = countTokens(body)
     log.debug("count_tokens", { reqId, tokens })
+    if (LOG_COMPACTION) {
+      log.info("compaction telemetry", {
+        reqId,
+        path: url.pathname,
+        model: body.model,
+        tokens,
+        messageCount: body.messages?.length ?? 0,
+        toolCount: body.tools?.length ?? 0,
+      })
+    }
     return new Response(JSON.stringify({ input_tokens: tokens }), {
       headers: { "content-type": "application/json" },
     })
@@ -103,6 +114,8 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
   }
 
   const translated = translateRequest({ ...body, model: resolvedModel }, { sessionId })
+  const localInputTokens = LOG_COMPACTION ? countTokens(body) : undefined
+  const translatedInputTokens = LOG_COMPACTION ? countTranslatedTokens(translated) : undefined
   log.debug("translated request", {
     reqId,
     requestedModel: body.model,
@@ -113,6 +126,20 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
     promptCacheKey: translated.prompt_cache_key,
   })
   if (VERBOSE) log.debug("translated request body", { reqId, body: translated })
+  if (LOG_COMPACTION) {
+    log.info("compaction telemetry", {
+      reqId,
+      phase: "translated_request",
+      requestedModel: body.model,
+      resolvedModel,
+      localInputTokens,
+      translatedInputTokens,
+      inputItems: translated.input.length,
+      toolCount: translated.tools?.length ?? 0,
+      hasInstructions: !!translated.instructions,
+      sessionId,
+    })
+  }
 
   let upstream
   try {
@@ -139,7 +166,28 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
   }
 
   if (wantStream) {
-    const stream = translateStream(upstream.body, { messageId, model: body.model })
+    const stream = translateStream(upstream.body, {
+      messageId,
+      model: body.model,
+      onFinish: LOG_COMPACTION
+        ? (finish) => {
+            log.info("compaction telemetry", {
+              reqId,
+              phase: "upstream_finish",
+              mode: "stream",
+              requestedModel: body.model,
+              resolvedModel,
+              localInputTokens,
+              translatedInputTokens,
+              upstreamInputTokens: finish.usage?.input_tokens ?? 0,
+              upstreamOutputTokens: finish.usage?.output_tokens ?? 0,
+              upstreamCachedInputTokens: finish.usage?.input_tokens_details?.cached_tokens ?? 0,
+              stopReason: finish.stopReason,
+              sessionId,
+            })
+          }
+        : undefined,
+    })
     return new Response(stream, {
       status: 200,
       headers: {
@@ -152,6 +200,22 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
 
   try {
     const result = await accumulateResponse(upstream.body, { messageId, model: body.model })
+    if (LOG_COMPACTION) {
+      log.info("compaction telemetry", {
+        reqId,
+        phase: "upstream_finish",
+        mode: "non_stream",
+        requestedModel: body.model,
+        resolvedModel,
+        localInputTokens,
+        translatedInputTokens,
+        upstreamInputTokens: result.usage.input_tokens,
+        upstreamOutputTokens: result.usage.output_tokens,
+        upstreamCachedInputTokens: result.usage.cache_read_input_tokens,
+        stopReason: result.stop_reason,
+        sessionId,
+      })
+    }
     return new Response(JSON.stringify(result), {
       headers: { "content-type": "application/json" },
     })

@@ -14,7 +14,11 @@ const log = createLogger("translate.stream")
  */
 export function translateStream(
   upstream: ReadableStream<Uint8Array>,
-  opts: { messageId: string; model: string },
+  opts: {
+    messageId: string
+    model: string
+    onFinish?: (finish: { stopReason: "end_turn" | "tool_use" | "max_tokens"; usage?: Parameters<typeof mapUsageToAnthropic>[0] }) => void
+  },
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
   return new ReadableStream<Uint8Array>({
@@ -93,6 +97,7 @@ export function translateStream(
               break
             case "finish":
               ensureMessageStart()
+              opts.onFinish?.({ stopReason: e.stopReason, usage: e.usage })
               emit("message_delta", {
                 type: "message_delta",
                 delta: { stop_reason: e.stopReason, stop_sequence: null },
