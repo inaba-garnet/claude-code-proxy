@@ -97,6 +97,45 @@ Or set it persistently in `~/.claude/settings.json`:
 }
 ```
 
+### 5. Optional: disable Claude Code auto-compact
+
+Claude Code decides auto-compaction locally based on the model context window it
+thinks it has. If your upstream Codex model supports a larger window than
+Claude Code assumes, Claude Code may compact earlier than necessary.
+
+As a workaround, you can disable only automatic compaction and keep manual
+`/compact` available:
+
+```sh
+DISABLE_AUTO_COMPACT=1 \
+ANTHROPIC_BASE_URL=http://localhost:18765 \
+ANTHROPIC_AUTH_TOKEN=unused \
+ANTHROPIC_MODEL=gpt-5.4 \
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+  claude
+```
+
+Or add it to `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:18765",
+    "ANTHROPIC_AUTH_TOKEN": "unused",
+    "ANTHROPIC_MODEL": "gpt-5.4",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1,
+    "DISABLE_AUTO_COMPACT": 1
+  }
+}
+```
+
+Tradeoffs:
+
+- Claude Code will stop proactively compacting before a turn.
+- Manual `/compact` still works.
+- If you let the session grow too far, you may hit prompt-too-long failures
+  instead of a graceful auto-compact.
+
 ## Supported models
 
 Set `ANTHROPIC_MODEL` to a model your ChatGPT subscription is allowed to use.
