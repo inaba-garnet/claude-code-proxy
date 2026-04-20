@@ -1,7 +1,12 @@
 #!/usr/bin/env bun
 import { startServer } from "./server.ts"
 import { createLogger, logDir } from "./log.ts"
-import { getProvider, listProviders } from "./providers/registry.ts"
+import {
+  allProviders,
+  allSupportedModels,
+  getProvider,
+  listProviders,
+} from "./providers/registry.ts"
 import type { CliHandlers } from "./providers/types.ts"
 
 declare const BUILD_VERSION: string | undefined
@@ -19,21 +24,22 @@ async function main() {
   }
 
   if (!first || first === "serve") {
-    const providerName = argFlag(rest, "--provider") ?? process.env.CCP_PROVIDER ?? "codex"
-    const provider = getProvider(providerName)
     const port = Number(process.env.PORT ?? 18765)
-    startServer({ port, provider })
-    console.log(`Proxy listening on http://localhost:${port} (provider: ${provider.name})`)
+    startServer({ port })
+    console.log(`Proxy listening on http://localhost:${port}`)
     console.log(`Logs: ${logDir()}/proxy.log`)
     console.log()
-    console.log("Configure Claude Code:")
+    console.log("Providers are selected per-request by ANTHROPIC_MODEL:")
+    for (const p of allProviders()) {
+      const models = [...p.supportedModels].join(", ")
+      console.log(`  ${p.name}: ${models}`)
+    }
+    console.log()
+    console.log("Configure Claude Code (pick a model from above):")
     console.log(`  export ANTHROPIC_BASE_URL="http://localhost:${port}"`)
     console.log(`  export ANTHROPIC_AUTH_TOKEN="anything"`)
-    if (provider.name === "codex") {
-      console.log(`  export ANTHROPIC_MODEL="gpt-5.4"`)
-    } else if (provider.name === "kimi") {
-      console.log(`  export ANTHROPIC_MODEL="kimi-for-coding"`)
-    }
+    console.log(`  export ANTHROPIC_MODEL="kimi-for-coding"              # or gpt-5.4, etc.`)
+    console.log(`  export ANTHROPIC_SMALL_FAST_MODEL="kimi-for-coding"   # background / title-gen`)
     console.log(`  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"`)
     return
   }
@@ -77,24 +83,22 @@ async function runProviderCommand(name: string, cli: CliHandlers, args: string[]
   }
 }
 
-function argFlag(args: string[], flag: string): string | undefined {
-  const i = args.indexOf(flag)
-  if (i === -1) return undefined
-  return args[i + 1]
-}
-
 function usageAndExit(): never {
   const providers = listProviders().join("|")
+  const models = allSupportedModels()
+    .map((m) => `${m.model} (${m.provider})`)
+    .join(", ")
   console.log(`Usage:
-  claude-code-proxy serve [--provider ${providers}]    Run proxy (PORT env, default 18765)
-  claude-code-proxy <provider> auth login              Browser OAuth
-  claude-code-proxy <provider> auth device             Device-code OAuth
-  claude-code-proxy <provider> auth status             Show current auth
-  claude-code-proxy <provider> auth logout             Clear stored auth
-  claude-code-proxy --version                          Show version
+  claude-code-proxy serve                      Run proxy (PORT env, default 18765)
+                                               Upstream is chosen per-request from ANTHROPIC_MODEL.
+  claude-code-proxy <provider> auth login      Browser OAuth
+  claude-code-proxy <provider> auth device     Device-code OAuth
+  claude-code-proxy <provider> auth status     Show current auth
+  claude-code-proxy <provider> auth logout     Clear stored auth
+  claude-code-proxy --version                  Show version
 
 Providers: ${providers}
-Default provider: ${process.env.CCP_PROVIDER ?? "codex"} (override with CCP_PROVIDER or --provider)
+Models:    ${models}
 `)
   process.exit(2)
 }

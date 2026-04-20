@@ -1,12 +1,12 @@
 import { createLogger, logDir } from "./log.ts"
 import type { AnthropicRequest } from "./anthropic/schema.ts"
 import type { Provider, RequestContext } from "./providers/types.ts"
+import { allSupportedModels, providerForModel } from "./providers/registry.ts"
 
 const log = createLogger("server")
 
 export interface ServeOptions {
   port: number
-  provider: Provider
 }
 
 const sessionSeqs = new Map<string, number>()
@@ -19,7 +19,6 @@ function nextSessionSeq(sessionId?: string): number | undefined {
 }
 
 export function startServer(opts: ServeOptions): { stop: () => void; port: number } {
-  const { provider } = opts
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: opts.port,
@@ -33,10 +32,9 @@ export function startServer(opts: ServeOptions): { stop: () => void; port: numbe
         method: req.method,
         path: url.pathname,
         query: url.search,
-        provider: provider.name,
       })
       try {
-        const resp = await route(req, url, reqId, provider)
+        const resp = await route(req, url, reqId)
         log.info("response", { reqId, status: resp.status, ms: Date.now() - start })
         return resp
       } catch (err) {
@@ -45,16 +43,16 @@ export function startServer(opts: ServeOptions): { stop: () => void; port: numbe
       }
     },
   })
-  log.info("server listening", { port: server.port, provider: provider.name, logDir: logDir() })
+  log.info("server listening", { port: server.port, logDir: logDir() })
   return {
     port: Number(server.port),
     stop: () => server.stop(),
   }
 }
 
-async function route(req: Request, url: URL, reqId: string, provider: Provider): Promise<Response> {
+async function route(req: Request, url: URL, reqId: string): Promise<Response> {
   if (url.pathname === "/healthz") {
-    return new Response(JSON.stringify({ ok: true, provider: provider.name }), {
+    return new Response(JSON.stringify({ ok: true }), {
       headers: { "content-type": "application/json" },
     })
   }
@@ -62,30 +60,68 @@ async function route(req: Request, url: URL, reqId: string, provider: Provider):
   if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
     const body = await parseJsonBody(req)
     if (body instanceof Response) return body
-    const sessionId = req.headers.get("x-claude-code-session-id") || undefined
-    const ctx: RequestContext = {
-      reqId,
-      sessionId,
-      sessionSeq: nextSessionSeq(sessionId),
-      signal: req.signal,
-    }
+    const provider = routeProvider(body, reqId)
+    if (provider instanceof Response) return provider
+    const ctx = buildCtx(req, reqId)
+    log.info("dispatch", { reqId, provider: provider.name, model: body.model })
     return provider.handleCountTokens(body, ctx)
   }
 
   if (req.method === "POST" && url.pathname === "/v1/messages") {
     const body = await parseJsonBody(req)
     if (body instanceof Response) return body
-    const sessionId = req.headers.get("x-claude-code-session-id") || undefined
-    const ctx: RequestContext = {
-      reqId,
-      sessionId,
-      sessionSeq: nextSessionSeq(sessionId),
-      signal: req.signal,
-    }
+    const provider = routeProvider(body, reqId)
+    if (provider instanceof Response) return provider
+    const ctx = buildCtx(req, reqId)
+    log.info("dispatch", { reqId, provider: provider.name, model: body.model })
     return provider.handleMessages(body, ctx)
   }
 
   return jsonError(404, "not_found", `No route for ${req.method} ${url.pathname}`)
+}
+
+function buildCtx(req: Request, reqId: string): RequestContext {
+  const sessionId = req.headers.get("x-claude-code-session-id") || undefined
+  return {
+    reqId,
+    sessionId,
+    sessionSeq: nextSessionSeq(sessionId),
+    signal: req.signal,
+  }
+}
+
+function routeProvider(body: AnthropicRequest, reqId: string): Provider | Response {
+  if (!body.model) {
+    return jsonError(
+      400,
+      "invalid_request_error",
+      `Missing "model" in request body. ${knownModelsMessage()}`,
+    )
+  }
+  const provider = providerForModel(body.model)
+  if (!provider) {
+    log.warn("unknown model", { reqId, model: body.model })
+    return jsonError(
+      400,
+      "invalid_request_error",
+      `Unknown model "${body.model}". ${knownModelsMessage()}`,
+    )
+  }
+  return provider
+}
+
+function knownModelsMessage(): string {
+  const groups = new Map<string, string[]>()
+  for (const { model, provider } of allSupportedModels()) {
+    const list = groups.get(provider) ?? []
+    list.push(model)
+    groups.set(provider, list)
+  }
+  const parts: string[] = []
+  for (const [provider, models] of groups) {
+    parts.push(`${provider}: ${models.join(", ")}`)
+  }
+  return `Supported: ${parts.join("; ")}.`
 }
 
 async function parseJsonBody(req: Request): Promise<AnthropicRequest | Response> {
