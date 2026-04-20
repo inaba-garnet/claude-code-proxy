@@ -4,6 +4,7 @@ import { assertAllowedModel, ModelNotAllowedError, resolveModel } from "./transl
 import { translateRequest } from "./translate/request.ts"
 import { translateStream } from "./translate/stream.ts"
 import { accumulateResponse, UpstreamStreamError } from "./translate/accumulate.ts"
+import { mapUsageToAnthropic } from "./translate/reducer.ts"
 import { CodexError, postCodex } from "./codex/client.ts"
 import { countTokens, countTranslatedTokens } from "./count-tokens.ts"
 
@@ -29,6 +30,20 @@ interface SessionMessageSnapshot {
   toolCount: number
   localInputTokens?: number
   translatedInputTokens?: number
+}
+
+function usageWindowTokens(usage: {
+  input_tokens: number
+  output_tokens: number
+  cache_creation_input_tokens: number
+  cache_read_input_tokens: number
+}): number {
+  return (
+    usage.input_tokens +
+    usage.output_tokens +
+    usage.cache_creation_input_tokens +
+    usage.cache_read_input_tokens
+  )
 }
 
 interface SessionTimelineState {
@@ -160,6 +175,8 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
     toolCount,
     stream: wantStream,
     sessionId,
+    requestedMaxTokens: body.max_tokens,
+    hasContextManagement: body.context_management !== undefined,
     hasJsonSchemaFormat: body.output_config?.format?.type === "json_schema",
   })
   if (VERBOSE) log.debug("anthropic request body", { reqId, body })
@@ -199,6 +216,9 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
     inputItems: translated.input.length,
     tools: translated.tools?.length ?? 0,
     hasInstructions: !!translated.instructions,
+    requestedMaxTokens: body.max_tokens,
+    translatedMaxOutputTokens: translated.max_output_tokens,
+    hasContextManagement: body.context_management !== undefined,
     promptCacheKey: translated.prompt_cache_key,
   })
   if (VERBOSE) log.debug("translated request body", { reqId, body: translated })
@@ -217,6 +237,9 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
       inputItems: translated.input.length,
       translatedToolCount: translated.tools?.length ?? 0,
       hasInstructions: !!translated.instructions,
+      requestedMaxTokens: body.max_tokens,
+      translatedMaxOutputTokens: translated.max_output_tokens,
+      hasContextManagement: body.context_management !== undefined,
       previousCountReqId: state?.lastCount?.reqId,
       previousCountModel: state?.lastCount?.model,
       previousCountTokens: state?.lastCount?.tokens,
@@ -257,6 +280,7 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
       sessionId,
       onFinish: VERBOSE
         ? (finish) => {
+            const mappedUsage = finish.usage ? mapUsageToAnthropic(finish.usage) : undefined
             log.info("compaction telemetry", {
               reqId,
               phase: "upstream_finish",
@@ -269,9 +293,18 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
               toolCount,
               localInputTokens,
               translatedInputTokens,
+              requestedMaxTokens: body.max_tokens,
+              translatedMaxOutputTokens: translated.max_output_tokens,
+              hasContextManagement: body.context_management !== undefined,
               upstreamInputTokens: finish.usage?.input_tokens ?? 0,
               upstreamOutputTokens: finish.usage?.output_tokens ?? 0,
               upstreamCachedInputTokens: finish.usage?.input_tokens_details?.cached_tokens ?? 0,
+              upstreamReasoningTokens:
+                finish.usage?.output_tokens_details?.reasoning_tokens ?? 0,
+              mappedInputTokens: mappedUsage?.input_tokens ?? 0,
+              mappedOutputTokens: mappedUsage?.output_tokens ?? 0,
+              mappedCachedInputTokens: mappedUsage?.cache_read_input_tokens ?? 0,
+              mappedContextWindowTokens: mappedUsage ? usageWindowTokens(mappedUsage) : 0,
               stopReason: finish.stopReason,
             })
           }
@@ -302,13 +335,21 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
         toolCount,
         localInputTokens,
         translatedInputTokens,
-        upstreamInputTokens: result.usage.input_tokens,
-        upstreamOutputTokens: result.usage.output_tokens,
-        upstreamCachedInputTokens: result.usage.cache_read_input_tokens,
-        stopReason: result.stop_reason,
+        requestedMaxTokens: body.max_tokens,
+        translatedMaxOutputTokens: translated.max_output_tokens,
+        hasContextManagement: body.context_management !== undefined,
+        upstreamInputTokens: result.rawUsage?.input_tokens ?? 0,
+        upstreamOutputTokens: result.rawUsage?.output_tokens ?? 0,
+        upstreamCachedInputTokens: result.rawUsage?.input_tokens_details?.cached_tokens ?? 0,
+        upstreamReasoningTokens: result.rawUsage?.output_tokens_details?.reasoning_tokens ?? 0,
+        mappedInputTokens: result.response.usage.input_tokens,
+        mappedOutputTokens: result.response.usage.output_tokens,
+        mappedCachedInputTokens: result.response.usage.cache_read_input_tokens,
+        mappedContextWindowTokens: usageWindowTokens(result.response.usage),
+        stopReason: result.response.stop_reason,
       })
     }
-    return new Response(JSON.stringify(result), {
+    return new Response(JSON.stringify(result.response), {
       headers: { "content-type": "application/json" },
     })
   } catch (err) {

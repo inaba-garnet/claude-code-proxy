@@ -1,4 +1,5 @@
 import { mapUsageToAnthropic, reduceUpstream } from "./reducer.ts"
+import type { CodexUsage } from "./reducer.ts"
 
 export { UpstreamStreamError } from "./reducer.ts"
 
@@ -21,6 +22,11 @@ export interface AnthropicNonStreamResponse {
   }
 }
 
+export interface AccumulatedResponse {
+  response: AnthropicNonStreamResponse
+  rawUsage?: CodexUsage
+}
+
 /**
  * Drive the Codex SSE stream to completion through the shared reducer
  * and fold the ReducerEvents into a single Anthropic non-streaming
@@ -30,7 +36,7 @@ export interface AnthropicNonStreamResponse {
 export async function accumulateResponse(
   upstream: ReadableStream<Uint8Array>,
   opts: { messageId: string; model: string },
-): Promise<AnthropicNonStreamResponse> {
+): Promise<AccumulatedResponse> {
   type Block =
     | { kind: "text"; text: string }
     | { kind: "tool"; id: string; name: string; args: string }
@@ -39,6 +45,7 @@ export async function accumulateResponse(
   const blocks = new Map<number, Block>()
   let stopReason: AnthropicNonStreamResponse["stop_reason"] = null
   let usage: ReturnType<typeof mapUsageToAnthropic> | undefined
+  let rawUsage: CodexUsage | undefined
 
   for await (const e of reduceUpstream(upstream)) {
     switch (e.kind) {
@@ -65,6 +72,7 @@ export async function accumulateResponse(
         break
       case "finish":
         stopReason = e.stopReason
+        rawUsage = e.usage
         usage = mapUsageToAnthropic(e.usage)
         break
     }
@@ -88,18 +96,21 @@ export async function accumulateResponse(
   }
 
   return {
-    id: opts.messageId,
-    type: "message",
-    role: "assistant",
-    model: opts.model,
-    content,
-    stop_reason: stopReason,
-    stop_sequence: null,
-    usage: usage ?? {
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: 0,
+    rawUsage,
+    response: {
+      id: opts.messageId,
+      type: "message",
+      role: "assistant",
+      model: opts.model,
+      content,
+      stop_reason: stopReason,
+      stop_sequence: null,
+      usage: usage ?? {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
     },
   }
 }
