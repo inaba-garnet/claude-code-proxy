@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.0.6 (2026-04-25)
+
+- Added support for `gpt-5.5`, and `opus`/`claude-opus-4-7` aliases now map to
+  `gpt-5.5` instead of `gpt-5.4`
+- Model names with a `[1m]` context suffix (e.g. `gpt-5.4[1m]`) are now
+  accepted and stripped before routing, so Claude Code's larger-context model
+  variants work without errors
+- Documented how to switch between the proxy and direct Anthropic in the README
+
 ## v0.0.5 (2026-04-22)
 
 - Added `CCP_CODEX_MODEL` and `CCP_CODEX_EFFORT` environment variables to
