@@ -6,9 +6,16 @@ import { forceRefresh, getAuth } from "./auth/manager.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestContext } from "../types.ts";
 import type { ResponsesRequest } from "./translate/request.ts";
-import { retryOn429 } from "../retry.ts";
+import { retryOn429, sleep } from "../retry.ts";
 
 const FETCH_WATCHDOG_INTERVAL_MS = 30_000;
+let fetchHeaderTimeoutMs = 60_000;
+let fetchHeaderTimeoutRetries = 1;
+
+export function setCodexHeaderTimeoutForTests(timeoutMs: number, retries: number): void {
+  fetchHeaderTimeoutMs = timeoutMs;
+  fetchHeaderTimeoutRetries = retries;
+}
 
 export interface CodexResponse {
   body: ReadableStream<Uint8Array>;
@@ -21,14 +28,46 @@ export async function postCodex(
   ctx: RequestContext,
 ): Promise<CodexResponse> {
   const log = ctx.childLogger("codex.client");
-  return retryOn429(() => attemptPostCodex(body, ctx, log), {
+  return retryHeaderTimeouts(
+    () =>
+      retryOn429(() => attemptPostCodex(body, ctx, log), {
+        log,
+        signal: ctx.signal,
+        classify: (err) =>
+          err instanceof CodexError && err.status === 429
+            ? { retryAfter: err.meta?.retryAfter }
+            : undefined,
+      }),
     log,
-    signal: ctx.signal,
-    classify: (err) =>
-      err instanceof CodexError && err.status === 429
-        ? { retryAfter: err.meta?.retryAfter }
-        : undefined,
-  });
+    ctx.signal,
+    body,
+  );
+}
+
+async function retryHeaderTimeouts(
+  run: () => Promise<CodexResponse>,
+  log: Logger,
+  signal: AbortSignal | undefined,
+  body: ResponsesRequest,
+): Promise<CodexResponse> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await run();
+    } catch (err) {
+      if (!(err instanceof CodexHeaderTimeoutError) || attempt >= fetchHeaderTimeoutRetries) throw err;
+      const waitMs = fetchHeaderTimeoutMs <= 10 ? 0 : 500 + Math.round(Math.random() * 1000);
+      log.warn("codex response headers timed out, retrying", {
+        attempt: attempt + 1,
+        maxRetries: fetchHeaderTimeoutRetries,
+        waitMs,
+        timeoutMs: fetchHeaderTimeoutMs,
+        model: body.model,
+        inputCount: body.input.length,
+        toolCount: body.tools?.length ?? 0,
+      });
+      await sleep(waitMs, signal);
+    }
+  }
 }
 
 async function attemptPostCodex(
@@ -113,19 +152,32 @@ async function doFetch(
       toolCount: body.tools?.length ?? 0,
     });
   }, FETCH_WATCHDOG_INTERVAL_MS);
+  const headerTimeout = new AbortController();
+  const timeout = setTimeout(() => {
+    headerTimeout.abort(new CodexHeaderTimeoutError(fetchHeaderTimeoutMs));
+  }, fetchHeaderTimeoutMs);
+  const onAbort = () => headerTimeout.abort(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const resp = await fetch(codexUrl, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      signal,
+      signal: headerTimeout.signal,
     });
     log.debug("received codex response headers", {
       status: resp.status,
       elapsedMs: Date.now() - startedAt,
     });
     return resp;
+  } catch (err) {
+    if (headerTimeout.signal.reason instanceof CodexHeaderTimeoutError) {
+      throw headerTimeout.signal.reason;
+    }
+    throw err;
   } finally {
+    signal?.removeEventListener("abort", onAbort);
+    clearTimeout(timeout);
     clearInterval(watchdog);
   }
 }
@@ -135,6 +187,13 @@ async function safeText(resp: Response): Promise<string> {
     return await resp.text();
   } catch {
     return "";
+  }
+}
+
+export class CodexHeaderTimeoutError extends Error {
+  constructor(public timeoutMs: number) {
+    super(`Timed out waiting ${timeoutMs}ms for Codex response headers`);
+    this.name = "CodexHeaderTimeoutError";
   }
 }
 
