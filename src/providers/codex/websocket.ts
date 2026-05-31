@@ -1,4 +1,3 @@
-import type { IncomingMessage } from "node:http";
 import WebSocket from "ws";
 import { headersToRecord } from "../../traffic.ts";
 import type { RequestContext } from "../types.ts";
@@ -205,10 +204,6 @@ class CodexWebSocketConnection {
         this.connectTimeoutMs,
       );
       ctx.signal.addEventListener("abort", onAbort, { once: true });
-      socket.on("upgrade", (_message: IncomingMessage) => {});
-      socket.on("unexpected-response", (_request, response) => {
-        failConnect(setupErrorFromResponse(response));
-      });
       socket.on("open", () => {
         cleanup();
         resolve();
@@ -518,22 +513,6 @@ function setupErrorFromEvent(
     event.headers?.["retry-after"],
     requestSent,
   );
-}
-
-function setupErrorFromResponse(response: IncomingMessage): CodexWebSocketSetupError {
-  const status = response.statusCode;
-  const retryAfter = headerValue(response.headers["retry-after"]);
-  return new CodexWebSocketSetupError(
-    `Codex WebSocket upgrade failed${status ? ` with status ${status}` : ""}`,
-    status,
-    undefined,
-    retryAfter,
-    false,
-  );
-}
-
-function headerValue(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
 }
 
 function isConnectionInvalidatingError(err: unknown): boolean {
