@@ -14,7 +14,7 @@ import { accumulateResponse, UpstreamStreamError } from "./translate/accumulate.
 import { mapUsageToAnthropic } from "./translate/reducer.ts";
 import { CodexError, postCodex } from "./client.ts";
 import { countTokens, countTranslatedTokens } from "./count-tokens.ts";
-import { summarizeCodexRequestSize } from "./request-summary.ts";
+import { summarizeCodexRequestSize, type CodexRequestSizeSummary } from "./request-summary.ts";
 import { runBrowserLogin } from "./auth/pkce.ts";
 import { runDeviceLogin } from "./auth/device.ts";
 import { persistInitialTokens } from "./auth/manager.ts";
@@ -110,6 +110,20 @@ function upstreamHeaderSnapshot(headers: Headers): {
     serverModel: headers.get("OpenAI-Model") || undefined,
     serverReasoningIncluded: headers.has("X-Reasoning-Included"),
   };
+}
+
+function warnForHeavyImages(
+  log: ReturnType<RequestContext["childLogger"]>,
+  requestSize: CodexRequestSizeSummary,
+): void {
+  if (requestSize.inputImageDataUrlBytes < 1_000_000) return;
+  log.warn("large inline images in codex request", {
+    inputImagePartCount: requestSize.inputImagePartCount,
+    inputImageDataUrlBytes: requestSize.inputImageDataUrlBytes,
+    bodyJsonBytes: requestSize.bodyJsonBytes,
+    inputJsonBytes: requestSize.inputJsonBytes,
+    largestInputImages: requestSize.largestInputImages,
+  });
 }
 
 function jsonError(status: number, type: string, message: string): Response {
@@ -222,6 +236,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
     throw err;
   }
   const requestSize = summarizeCodexRequestSize(translated);
+  warnForHeavyImages(log, requestSize);
   const localInputTokens = logVerbose() ? countTokens(body) : undefined;
   const translatedInputTokens = logVerbose() ? countTranslatedTokens(translated) : undefined;
   if (state) {

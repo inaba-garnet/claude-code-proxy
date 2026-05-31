@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { loadConfig } from "./config.ts";
-import { startServer } from "./server.ts";
+import { startServer, normalizeIncomingModel } from "./server.ts";
 
 const servers: Array<{ stop: () => void }> = [];
 
@@ -19,6 +19,14 @@ function countTokens(port: number, model: string, sessionId?: string): Promise<R
     body: JSON.stringify({ model, messages: [{ role: "user", content: "hello" }] }),
   });
 }
+
+describe("normalizeIncomingModel", () => {
+  it("removes Claude Code local context hints without changing the model id otherwise", () => {
+    expect(normalizeIncomingModel("gpt-5.5[1m]")).toBe("gpt-5.5");
+    expect(normalizeIncomingModel("gpt-5.4-fast[1m]")).toBe("gpt-5.4-fast");
+    expect(normalizeIncomingModel("kimi-for-coding")).toBe("kimi-for-coding");
+  });
+});
 
 describe("server session-aware alias routing", () => {
   it("routes aliases to the concrete provider used earlier in the session", async () => {
