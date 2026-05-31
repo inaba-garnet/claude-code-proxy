@@ -180,6 +180,17 @@ export async function codexWebSocketRequest(
         );
         return;
       }
+      if (event.type === "error" && event.error?.message?.includes("Previous response with id")) {
+        fail(
+          new CodexWebSocketSetupError(
+            event.error.message,
+            event.status,
+            event.error.code,
+            event.headers?.["retry-after"],
+          ),
+        );
+        return;
+      }
       enqueue(encoder.encode(encodeSse(text)));
       if (!settled) {
         settled = true;
