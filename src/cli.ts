@@ -1,7 +1,13 @@
 #!/usr/bin/env bun
 import { startServer } from "./server.ts";
 import { createLogger, logFile } from "./log.ts";
-import { port as configPort, getConfig, aliasProvider as configAliasProvider } from "./config.ts";
+import {
+  port as configPort,
+  getConfig,
+  aliasProvider as configAliasProvider,
+  codexTransport,
+  codexPreviousResponseId,
+} from "./config.ts";
 import { configDir } from "./paths.ts";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -148,6 +154,15 @@ function printConfigSummary(): void {
 
   if (cfg.env.CCP_CODEX_BASE_URL) overrides.push("CCP_CODEX_BASE_URL (env)");
   else if (fromFile.codex?.baseUrl) overrides.push("codex.baseUrl (config)");
+
+  if (cfg.env.CCP_CODEX_TRANSPORT) overrides.push(`CCP_CODEX_TRANSPORT=${codexTransport()} (env)`);
+  else if (fromFile.codex?.transport)
+    overrides.push(`codex.transport=${fromFile.codex.transport} (config)`);
+
+  if (cfg.env.CCP_CODEX_PREVIOUS_RESPONSE_ID !== undefined)
+    overrides.push(`CCP_CODEX_PREVIOUS_RESPONSE_ID=${codexPreviousResponseId()} (env)`);
+  else if (fromFile.codex?.previousResponseId !== undefined)
+    overrides.push(`codex.previousResponseId=${fromFile.codex.previousResponseId} (config)`);
 
   if (cfg.env.CCP_ALIAS_PROVIDER)
     overrides.push(`CCP_ALIAS_PROVIDER=${configAliasProvider()} (env)`);

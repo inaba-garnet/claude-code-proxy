@@ -1,5 +1,5 @@
 import { mapUsageToAnthropic, reduceUpstream } from "./reducer.ts";
-import type { CodexUsage } from "./reducer.ts";
+import type { CodexUsage, ReducerEvent } from "./reducer.ts";
 import type { Logger } from "../../../log.ts";
 import type { TrafficCapture } from "../../types.ts";
 import { attachTrafficCapture, createUpstreamStreamDiagnostics } from "./reducer.ts";
@@ -24,9 +24,15 @@ export interface AnthropicNonStreamResponse {
   };
 }
 
+type FinishEvent = Extract<ReducerEvent, { kind: "finish" }>;
+
 export interface AccumulatedResponse {
   response: AnthropicNonStreamResponse;
   rawUsage?: CodexUsage;
+  terminalType?: FinishEvent["terminalType"];
+  continuationEligible: boolean;
+  responseId?: string;
+  outputItems: FinishEvent["outputItems"];
 }
 
 /**
@@ -48,6 +54,10 @@ export async function accumulateResponse(
   let stopReason: AnthropicNonStreamResponse["stop_reason"] = null;
   let usage: ReturnType<typeof mapUsageToAnthropic> | undefined;
   let rawUsage: CodexUsage | undefined;
+  let terminalType: FinishEvent["terminalType"] | undefined;
+  let continuationEligible = false;
+  let responseId: string | undefined;
+  let outputItems: FinishEvent["outputItems"] = [];
 
   const diagnostics = attachTrafficCapture(createUpstreamStreamDiagnostics(), opts.traffic);
 
@@ -78,6 +88,10 @@ export async function accumulateResponse(
         stopReason = e.stopReason;
         rawUsage = e.usage;
         usage = mapUsageToAnthropic(e.usage);
+        terminalType = e.terminalType;
+        continuationEligible = e.continuationEligible;
+        responseId = e.responseId;
+        outputItems = e.outputItems;
         break;
     }
   }
@@ -101,6 +115,10 @@ export async function accumulateResponse(
 
   return {
     rawUsage,
+    terminalType,
+    continuationEligible,
+    responseId,
+    outputItems,
     response: {
       id: opts.messageId,
       type: "message",

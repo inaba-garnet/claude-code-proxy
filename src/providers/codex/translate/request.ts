@@ -46,6 +46,23 @@ export interface ResponsesRequest {
   client_metadata?: Record<string, string>;
 }
 
+export interface ResponsesWebSocketRequest extends ResponsesRequest {
+  previous_response_id?: string;
+  generate?: boolean;
+}
+
+export function toWebSocketRequest(
+  body: ResponsesRequest,
+  opts: { previousResponseId?: string; input?: ResponsesInputItem[]; generate?: boolean } = {},
+): ResponsesWebSocketRequest {
+  return {
+    ...body,
+    ...(opts.input ? { input: opts.input } : {}),
+    ...(opts.previousResponseId ? { previous_response_id: opts.previousResponseId } : {}),
+    ...(opts.generate !== undefined ? { generate: opts.generate } : {}),
+  };
+}
+
 export type ResponsesInputItem =
   | {
       type: "message";
@@ -67,7 +84,7 @@ export type ResponsesInputItem =
 export type ResponsesContentPart =
   | { type: "input_text"; text: string }
   | { type: "output_text"; text: string }
-  | { type: "input_image"; image_url: string };
+  | { type: "input_image"; image_url: string; detail?: "auto" | "low" | "high" };
 
 export interface ResponsesTool {
   type: "function";

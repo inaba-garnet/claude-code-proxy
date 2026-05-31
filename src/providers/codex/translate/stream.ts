@@ -11,6 +11,7 @@ import {
   mapUsageToAnthropic,
   reduceUpstream,
   UpstreamStreamError,
+  type ReducerEvent,
 } from "./reducer.ts";
 
 /**
@@ -35,10 +36,8 @@ export function translateStream(
     upstreamHeaders?: Headers;
     traffic?: TrafficCapture;
     requestSize?: CodexRequestSizeSummary;
-    onFinish?: (finish: {
-      stopReason: "end_turn" | "tool_use" | "max_tokens";
-      usage?: Parameters<typeof mapUsageToAnthropic>[0];
-    }) => void;
+    onFinish?: (finish: Extract<ReducerEvent, { kind: "finish" }>) => void;
+    onInvalidateContinuation?: () => void;
   },
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -189,7 +188,7 @@ export function translateStream(
                 throw new UpstreamStreamError("failed", "Stream finished with open content blocks");
               }
               ensureMessageStart();
-              opts.onFinish?.({ stopReason: e.stopReason, usage: e.usage });
+              opts.onFinish?.(e);
               emit("message_delta", {
                 type: "message_delta",
                 delta: { stop_reason: e.stopReason, stop_sequence: null },
@@ -209,6 +208,7 @@ export function translateStream(
           index,
           ...block,
         }));
+        opts.onInvalidateContinuation?.();
         if (opts.signal?.aborted) {
           opts.log.info("stream cancelled", {
             err: describeError(err),

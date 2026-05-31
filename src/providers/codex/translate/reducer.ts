@@ -2,6 +2,7 @@ import { createSseStreamStats, parseSseStream, type SseStreamStats } from "../..
 import type { Logger } from "../../../log.ts";
 import { logVerbose } from "../../../config.ts";
 import type { TrafficCapture } from "../../types.ts";
+import type { ResponsesInputItem } from "./request.ts";
 
 export class UpstreamStreamError extends Error {
   constructor(
@@ -22,6 +23,7 @@ export interface CodexUsage {
 }
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens";
+export type TerminalType = "response.completed" | "response.incomplete" | "response.done";
 
 export type ReducerEvent =
   | { kind: "text-start"; index: number }
@@ -32,7 +34,15 @@ export type ReducerEvent =
   | { kind: "tool-progress"; index: number }
   | { kind: "progress" }
   | { kind: "tool-stop"; index: number }
-  | { kind: "finish"; stopReason: StopReason; usage: CodexUsage | undefined };
+  | {
+      kind: "finish";
+      stopReason: StopReason;
+      terminalType: TerminalType;
+      continuationEligible: boolean;
+      usage: CodexUsage | undefined;
+      responseId?: string;
+      outputItems: ResponsesInputItem[];
+    };
 
 interface TextState {
   kind: "text";
@@ -217,11 +227,33 @@ export async function* reduceUpstream(
   diagnostics = createUpstreamStreamDiagnostics(),
 ): AsyncGenerator<ReducerEvent> {
   const blocksByOutputIndex = new Map<number, BlockState>();
+  const outputItemsByIndex = new Map<number, ResponsesInputItem>();
   const itemIdToOutputIndex = new Map<string, number>();
   let anthropicIndex = 0;
   let sawToolUse = false;
   let finalUsage: CodexUsage | undefined;
+  let responseId: string | undefined;
+  let terminalType: TerminalType | undefined;
+  let continuationEligible = false;
   let incomplete = false;
+
+  function captureOutputItem(outputIndex: number, state: BlockState): void {
+    if (state.kind === "text") {
+      if (!state.textAccum) return;
+      outputItemsByIndex.set(outputIndex, {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: state.textAccum }],
+      });
+      return;
+    }
+    outputItemsByIndex.set(outputIndex, {
+      type: "function_call",
+      call_id: state.callId,
+      name: state.name,
+      arguments: state.argsAccum,
+    });
+  }
 
   for await (const evt of parseSseStream(upstream, diagnostics.stats)) {
     if (!evt.data) continue;
@@ -396,6 +428,7 @@ export async function* reduceUpstream(
           }
         }
       }
+      captureOutputItem(p.output_index, state);
       if (state.kind === "text") {
         log.debug("text block complete", { index: state.index, text: state.textAccum });
         yield { kind: "text-stop", index: state.index };
@@ -412,17 +445,20 @@ export async function* reduceUpstream(
       continue;
     }
 
-    if (t === "response.completed" || t === "response.incomplete") {
+    if (t === "response.completed" || t === "response.incomplete" || t === "response.done") {
       diagnostics.sawTerminalEvent = true;
+      terminalType = t;
+      responseId = p.response?.id;
       finalUsage = p.response?.usage;
       const reason = p.response?.incomplete_details?.reason;
       if (
         t === "response.incomplete" ||
-        reason === "max_output_tokens" ||
+        reason !== undefined ||
         p.response?.status === "incomplete"
       ) {
         incomplete = true;
       }
+      continuationEligible = (t === "response.completed" || t === "response.done") && !incomplete;
       continue;
     }
   }
@@ -446,7 +482,18 @@ export async function* reduceUpstream(
   }
 
   const stopReason: StopReason = incomplete ? "max_tokens" : sawToolUse ? "tool_use" : "end_turn";
-  yield { kind: "finish", stopReason, usage: finalUsage };
+  const outputItems = Array.from(outputItemsByIndex.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([, item]) => item);
+  yield {
+    kind: "finish",
+    stopReason,
+    terminalType: terminalType ?? "response.incomplete",
+    continuationEligible,
+    usage: finalUsage,
+    responseId,
+    outputItems,
+  };
 }
 
 export function mapUsageToAnthropic(u: CodexUsage | undefined): {

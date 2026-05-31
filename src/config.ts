@@ -10,6 +10,7 @@ import { configDir } from "./paths.ts";
 // to the next layer (matches existing CCP_CODEX_MODEL behavior).
 
 export type AliasProvider = "codex" | "kimi";
+export type CodexTransport = "http" | "websocket" | "auto";
 
 export interface FileConfig {
   port?: number;
@@ -21,6 +22,8 @@ export interface FileConfig {
     effort?: string;
     serviceTier?: string;
     baseUrl?: string;
+    transport?: CodexTransport;
+    previousResponseId?: boolean;
   };
   kimi?: {
     userAgent?: string;
@@ -67,6 +70,26 @@ function parseAliasProvider(key: string, value: unknown): AliasProvider | undefi
   return undefined;
 }
 
+function parseCodexTransport(key: string, value: unknown): CodexTransport | undefined {
+  if (value === undefined) return undefined;
+  if (value === "http" || value === "websocket" || value === "auto") return value;
+  warnInvalid(key, '"http", "websocket", or "auto"', value);
+  return undefined;
+}
+
+function parseBoolean(key: string, value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "boolean") return value;
+  warnInvalid(key, "boolean", value);
+  return undefined;
+}
+
+function parseBooleanEnv(value: string | undefined): boolean | undefined {
+  const normalized = emptyOrUnset(value)?.toLowerCase();
+  if (normalized === undefined) return undefined;
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
 function validate(raw: unknown): FileConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const r = raw as Record<string, unknown>;
@@ -103,7 +126,16 @@ function validate(raw: unknown): FileConfig {
 
   const codex = validateStringSection(
     "codex",
-    ["originator", "userAgent", "model", "effort", "serviceTier", "baseUrl"],
+    [
+      "originator",
+      "userAgent",
+      "model",
+      "effort",
+      "serviceTier",
+      "baseUrl",
+      "transport",
+      "previousResponseId",
+    ],
     {
       originator: "string",
       userAgent: "string",
@@ -111,9 +143,15 @@ function validate(raw: unknown): FileConfig {
       effort: "string",
       serviceTier: "string",
       baseUrl: "string",
+      transport: "string",
+      previousResponseId: "boolean",
     },
   );
-  if (codex) out.codex = codex;
+  if (codex) {
+    codex.transport = parseCodexTransport("codex.transport", codex.transport);
+    codex.previousResponseId = parseBoolean("codex.previousResponseId", codex.previousResponseId);
+    out.codex = codex;
+  }
 
   const kimi = validateStringSection("kimi", ["userAgent", "oauthHost", "baseUrl"], {
     userAgent: "string",
@@ -215,6 +253,24 @@ export function codexServiceTier(): string | undefined {
 export function codexBaseUrl(defaultValue: string): string {
   const c = getConfig();
   return c.env.CCP_CODEX_BASE_URL ?? c.file.codex?.baseUrl ?? defaultValue;
+}
+
+export function codexTransport(): CodexTransport {
+  const c = getConfig();
+  return (
+    parseCodexTransport("CCP_CODEX_TRANSPORT", emptyOrUnset(c.env.CCP_CODEX_TRANSPORT)) ??
+    c.file.codex?.transport ??
+    "websocket"
+  );
+}
+
+export function codexPreviousResponseId(): boolean {
+  const c = getConfig();
+  return (
+    parseBooleanEnv(c.env.CCP_CODEX_PREVIOUS_RESPONSE_ID) ??
+    c.file.codex?.previousResponseId ??
+    false
+  );
 }
 
 export function aliasProvider(): AliasProvider {

@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { loadConfig } from "../../../config.ts";
 import type { AnthropicRequest } from "../../../anthropic/schema.ts";
 import { countTokens } from "../count-tokens.ts";
-import { InvalidServiceTierError, toolResultToString, translateRequest } from "./request.ts";
+import {
+  InvalidServiceTierError,
+  toWebSocketRequest,
+  toolResultToString,
+  translateRequest,
+} from "./request.ts";
 const baseRequest: AnthropicRequest = {
   model: "claude-sonnet-4-6",
   messages: [{ role: "user", content: "hello" }],
@@ -166,6 +171,29 @@ describe("translateRequest", () => {
       },
       strict: true,
     });
+  });
+
+  it("builds a websocket request without mutating the HTTP request", () => {
+    const translated = translateRequest(baseRequest);
+    const delta = [
+      {
+        type: "message" as const,
+        role: "user" as const,
+        content: [{ type: "input_text" as const, text: "next" }],
+      },
+    ];
+
+    const ws = toWebSocketRequest(translated, {
+      previousResponseId: "resp_1",
+      input: delta,
+      generate: false,
+    });
+
+    expect(ws.previous_response_id).toBe("resp_1");
+    expect(ws.generate).toBe(false);
+    expect(ws.input).toEqual(delta);
+    expect(translated.input).not.toEqual(delta);
+    expect("previous_response_id" in translated).toBe(false);
   });
 
   it("returns only the expected top-level upstream request fields", () => {

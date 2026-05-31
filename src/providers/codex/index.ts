@@ -19,7 +19,8 @@ import { runBrowserLogin } from "./auth/pkce.ts";
 import { runDeviceLogin } from "./auth/device.ts";
 import { persistInitialTokens } from "./auth/manager.ts";
 import { loadAuth, authPath, clearAuth } from "./auth/token-store.ts";
-import { logVerbose } from "../../config.ts";
+import { codexPreviousResponseId, logVerbose } from "../../config.ts";
+import { clearContinuation, continuationCandidate, recordContinuation } from "./continuation.ts";
 
 interface SessionCountSnapshot {
   reqId: string;
@@ -287,10 +288,20 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
     });
   }
 
+  const previousResponseIdEnabled = codexPreviousResponseId();
+  const continuation = continuationCandidate(ctx.sessionId, translated, previousResponseIdEnabled);
+  log.debug("codex continuation", {
+    enabled: previousResponseIdEnabled,
+    previousResponseId: continuation.previousResponseId,
+    inputDeltaCount: continuation.inputDeltaCount,
+    disabledReason: continuation.disabledReason,
+  });
+
   let upstream;
   try {
-    upstream = await postCodex(translated, ctx);
+    upstream = await postCodex(translated, ctx, { continuation });
   } catch (err) {
+    clearContinuation(ctx.sessionId);
     if (err instanceof CodexError) {
       log.warn("codex error", { status: err.status, detail: err.detail });
       if (err.status === 429) {
@@ -321,35 +332,41 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       upstreamHeaders: upstream.headers,
       traffic: ctx.traffic,
       requestSize,
-      onFinish: logVerbose()
-        ? (finish) => {
-            const mappedUsage = finish.usage ? mapUsageToAnthropic(finish.usage) : undefined;
-            log.info("compaction telemetry", {
-              phase: "upstream_finish",
-              mode: "stream",
-              requestedModel: body.model,
-              resolvedModel,
-              serverModel,
-              serverReasoningIncluded,
-              messageCount,
-              toolCount,
-              localInputTokens,
-              translatedInputTokens,
-              requestedMaxTokens: body.max_tokens,
-              hasContextManagement: contextManagement !== undefined,
-              contextManagement,
-              upstreamInputTokens: finish.usage?.input_tokens ?? 0,
-              upstreamOutputTokens: finish.usage?.output_tokens ?? 0,
-              upstreamCachedInputTokens: finish.usage?.input_tokens_details?.cached_tokens ?? 0,
-              upstreamReasoningTokens: finish.usage?.output_tokens_details?.reasoning_tokens ?? 0,
-              mappedInputTokens: mappedUsage?.input_tokens ?? 0,
-              mappedOutputTokens: mappedUsage?.output_tokens ?? 0,
-              mappedCachedInputTokens: mappedUsage?.cache_read_input_tokens ?? 0,
-              mappedContextWindowTokens: mappedUsage ? usageWindowTokens(mappedUsage) : 0,
-              stopReason: finish.stopReason,
-            });
-          }
-        : undefined,
+      onFinish: (finish) => {
+        if (finish.continuationEligible) {
+          recordContinuation(ctx.sessionId, translated, finish.responseId, finish.outputItems);
+        } else {
+          clearContinuation(ctx.sessionId);
+        }
+        if (logVerbose()) {
+          const mappedUsage = finish.usage ? mapUsageToAnthropic(finish.usage) : undefined;
+          log.info("compaction telemetry", {
+            phase: "upstream_finish",
+            mode: "stream",
+            requestedModel: body.model,
+            resolvedModel,
+            serverModel,
+            serverReasoningIncluded,
+            messageCount,
+            toolCount,
+            localInputTokens,
+            translatedInputTokens,
+            requestedMaxTokens: body.max_tokens,
+            hasContextManagement: contextManagement !== undefined,
+            contextManagement,
+            upstreamInputTokens: finish.usage?.input_tokens ?? 0,
+            upstreamOutputTokens: finish.usage?.output_tokens ?? 0,
+            upstreamCachedInputTokens: finish.usage?.input_tokens_details?.cached_tokens ?? 0,
+            upstreamReasoningTokens: finish.usage?.output_tokens_details?.reasoning_tokens ?? 0,
+            mappedInputTokens: mappedUsage?.input_tokens ?? 0,
+            mappedOutputTokens: mappedUsage?.output_tokens ?? 0,
+            mappedCachedInputTokens: mappedUsage?.cache_read_input_tokens ?? 0,
+            mappedContextWindowTokens: mappedUsage ? usageWindowTokens(mappedUsage) : 0,
+            stopReason: finish.stopReason,
+          });
+        }
+      },
+      onInvalidateContinuation: () => clearContinuation(ctx.sessionId),
     });
     return new Response(stream, {
       status: 200,
@@ -368,6 +385,11 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       log: ctx.childLogger("codex.accumulate"),
       traffic: ctx.traffic,
     });
+    if (result.continuationEligible) {
+      recordContinuation(ctx.sessionId, translated, result.responseId, result.outputItems);
+    } else {
+      clearContinuation(ctx.sessionId);
+    }
     if (logVerbose()) {
       const { serverModel, serverReasoningIncluded } = upstreamHeaderSnapshot(upstream.headers);
       log.info("compaction telemetry", {
@@ -399,6 +421,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       headers: { "content-type": "application/json" },
     });
   } catch (err) {
+    clearContinuation(ctx.sessionId);
     if (err instanceof UpstreamStreamError) {
       log.warn("upstream stream error (non-streaming)", {
         kind: err.kind,

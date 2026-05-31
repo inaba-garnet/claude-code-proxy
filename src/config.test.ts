@@ -11,6 +11,8 @@ import {
   codexEffort,
   codexServiceTier,
   codexBaseUrl,
+  codexTransport,
+  codexPreviousResponseId,
   aliasProvider,
   kimiUserAgent,
   kimiOauthHost,
@@ -48,6 +50,8 @@ describe("config defaults", () => {
     expect(codexEffort()).toBeUndefined();
     expect(codexServiceTier()).toBeUndefined();
     expect(codexBaseUrl("default-codex-url")).toBe("default-codex-url");
+    expect(codexTransport()).toBe("websocket");
+    expect(codexPreviousResponseId()).toBe(false);
     expect(aliasProvider()).toBe("codex");
     expect(kimiUserAgent("default-kimi-ua")).toBe("default-kimi-ua");
     expect(kimiOauthHost()).toBe("https://auth.kimi.com");
@@ -85,6 +89,16 @@ describe("file overrides default", () => {
     );
     setEnv({});
     expect(codexBaseUrl("default")).toBe("http://127.0.0.1:2455/backend-api/codex/responses");
+  });
+
+  it("codex transport and previous response id from config.json", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ codex: { transport: "http", previousResponseId: true } }),
+    );
+    setEnv({});
+    expect(codexTransport()).toBe("http");
+    expect(codexPreviousResponseId()).toBe(true);
   });
 
   it("aliasProvider from config.json", () => {
@@ -131,6 +145,16 @@ describe("env overrides file", () => {
     expect(codexBaseUrl("default")).toBe("http://127.0.0.1:2455/env");
   });
 
+  it("Codex transport env wins over config", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ codex: { transport: "http", previousResponseId: false } }),
+    );
+    setEnv({ CCP_CODEX_TRANSPORT: "auto", CCP_CODEX_PREVIOUS_RESPONSE_ID: "true" });
+    expect(codexTransport()).toBe("auto");
+    expect(codexPreviousResponseId()).toBe(true);
+  });
+
   it("CCP_ALIAS_PROVIDER env wins over config", () => {
     writeFileSync(configPath, JSON.stringify({ aliasProvider: "kimi" }));
     setEnv({ CCP_ALIAS_PROVIDER: "codex" });
@@ -161,6 +185,16 @@ describe("empty-string semantics", () => {
   it("empty CCP_CODEX_MODEL env with no file value returns undefined", () => {
     setEnv({ CCP_CODEX_MODEL: "" });
     expect(codexModel()).toBeUndefined();
+  });
+
+  it("empty Codex transport env falls through to file value", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ codex: { transport: "http", previousResponseId: true } }),
+    );
+    setEnv({ CCP_CODEX_TRANSPORT: "", CCP_CODEX_PREVIOUS_RESPONSE_ID: "" });
+    expect(codexTransport()).toBe("http");
+    expect(codexPreviousResponseId()).toBe(true);
   });
 
   it("empty CCP_CODEX_SERVICE_TIER env falls through to file value", () => {
@@ -226,6 +260,12 @@ describe("malformed config", () => {
     writeFileSync(configPath, JSON.stringify({ aliasProvider: "openai" }));
     setEnv({});
     expect(aliasProvider()).toBe("codex");
+  });
+
+  it("ignores invalid Codex transport values", () => {
+    writeFileSync(configPath, JSON.stringify({ codex: { transport: "websockets" } }));
+    setEnv({});
+    expect(codexTransport()).toBe("websocket");
   });
 
   it("returns defaults when file is missing entirely", () => {

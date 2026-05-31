@@ -1,14 +1,20 @@
 import { CODEX_API_ENDPOINT, ORIGINATOR as ORIGINATOR_DEFAULT } from "./auth/constants.ts";
-import { codexBaseUrl, codexOriginator, codexUserAgent } from "../../config.ts";
+import { codexBaseUrl, codexOriginator, codexTransport, codexUserAgent } from "../../config.ts";
 declare const BUILD_VERSION: string | undefined;
 const PROXY_VERSION = typeof BUILD_VERSION === "string" ? BUILD_VERSION : "dev";
 import { forceRefresh, getAuth } from "./auth/manager.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestContext } from "../types.ts";
-import type { ResponsesRequest } from "./translate/request.ts";
+import { toWebSocketRequest, type ResponsesRequest } from "./translate/request.ts";
 import { retryOn429, sleep } from "../retry.ts";
 import { headersToRecord } from "../../traffic.ts";
 import { summarizeCodexRequestSize } from "./request-summary.ts";
+import {
+  CodexWebSocketSetupError,
+  codexWebSocketHeaders,
+  codexWebSocketRequest,
+} from "./websocket.ts";
+import type { ContinuationCandidate } from "./continuation.ts";
 
 const FETCH_WATCHDOG_INTERVAL_MS = 30_000;
 let fetchHeaderTimeoutMs = 60_000;
@@ -25,14 +31,19 @@ export interface CodexResponse {
   headers: Headers;
 }
 
+export interface PostCodexOptions {
+  continuation?: ContinuationCandidate;
+}
+
 export async function postCodex(
   body: ResponsesRequest,
   ctx: RequestContext,
+  opts: PostCodexOptions = {},
 ): Promise<CodexResponse> {
   const log = ctx.childLogger("codex.client");
   return retryHeaderTimeouts(
     () =>
-      retryOn429(() => attemptPostCodex(body, ctx, log), {
+      retryOn429(() => attemptPostCodex(body, ctx, log, opts), {
         log,
         signal: ctx.signal,
         classify: (err) =>
@@ -78,15 +89,28 @@ async function attemptPostCodex(
   body: ResponsesRequest,
   ctx: RequestContext,
   log: Logger,
+  opts: PostCodexOptions,
 ): Promise<CodexResponse> {
   let auth = await getAuth();
-  let resp = await doFetch(auth.access, auth.accountId, body, ctx, log);
+  let resp: Response;
+  try {
+    resp = await doFetch(auth.access, auth.accountId, body, ctx, log, opts);
+  } catch (err) {
+    if (!(err instanceof CodexWebSocketSetupError)) throw err;
+    if (err.status === 429) {
+      throw new CodexError(429, "Rate limited", err.message, { retryAfter: err.retryAfter });
+    }
+    if (err.status !== 401 && err.status !== 403) throw err;
+    log.warn("codex websocket auth failed, refreshing token", { status: err.status });
+    auth = await forceRefresh();
+    resp = await doFetch(auth.access, auth.accountId, body, ctx, log, opts);
+  }
 
   if (resp.status === 401) {
     log.warn("got 401, refreshing token", {});
     try {
       auth = await forceRefresh();
-      resp = await doFetch(auth.access, auth.accountId, body, ctx, log);
+      resp = await doFetch(auth.access, auth.accountId, body, ctx, log, opts);
     } catch (err) {
       log.error("refresh after 401 failed", { err: String(err) });
     }
@@ -123,7 +147,27 @@ async function doFetch(
   body: ResponsesRequest,
   ctx: RequestContext,
   log: Logger,
+  opts: PostCodexOptions,
 ): Promise<Response> {
+  const mode = codexTransport();
+  if (mode === "websocket") return doFetchWebSocket(accessToken, accountId, body, ctx, log, opts);
+  if (mode === "auto") {
+    try {
+      return await doFetchWebSocket(accessToken, accountId, body, ctx, log, opts);
+    } catch (err) {
+      log.warn("codex websocket failed before response, falling back to http", {
+        err: String(err),
+      });
+    }
+  }
+  return doFetchHttp(accessToken, accountId, body, ctx, log);
+}
+
+function codexHeaders(
+  accessToken: string,
+  accountId: string | undefined,
+  ctx: RequestContext,
+): Headers {
   const headers = new Headers({
     "Content-Type": "application/json",
     accept: "text/event-stream",
@@ -139,7 +183,84 @@ async function doFetch(
     headers.set("x-client-request-id", ctx.sessionId);
     headers.set("x-codex-window-id", `${ctx.sessionId}:0`);
   }
+  return headers;
+}
 
+async function doFetchWebSocket(
+  accessToken: string,
+  accountId: string | undefined,
+  body: ResponsesRequest,
+  ctx: RequestContext,
+  log: Logger,
+  opts: PostCodexOptions,
+): Promise<Response> {
+  const headers = codexHeaders(accessToken, accountId, ctx);
+  const requestHeaders = codexWebSocketHeaders(headers);
+  const codexUrl = codexBaseUrl(CODEX_API_ENDPOINT);
+  const continuation = opts.continuation;
+  const wsBody = toWebSocketRequest(body, {
+    previousResponseId: continuation?.previousResponseId,
+    input: continuation?.inputDelta,
+  });
+  const bodyJson = JSON.stringify(wsBody);
+  const size = summarizeCodexRequestSize(wsBody, bodyJson);
+  ctx.traffic?.writeJson("020-upstream-request", wsBody);
+  ctx.traffic?.writeJson("021-upstream-request-metadata", {
+    provider: "codex",
+    transport: "websocket",
+    url: codexUrl,
+    method: "GET",
+    headers: requestHeaders,
+    size,
+    continuation: {
+      previousResponseId: continuation?.previousResponseId,
+      inputDeltaCount: continuation?.inputDeltaCount ?? body.input.length,
+      disabledReason: continuation?.disabledReason,
+    },
+  });
+  log.debug("posting to codex websocket", {
+    url: codexUrl,
+    model: body.model,
+    inputCount: wsBody.input.length,
+    toolCount: body.tools?.length ?? 0,
+    serviceTier: body.service_tier,
+    reasoningEffort: body.reasoning?.effort,
+    promptCacheKey: body.prompt_cache_key,
+    continuation: {
+      previousResponseId: continuation?.previousResponseId,
+      inputDeltaCount: continuation?.inputDeltaCount,
+      disabledReason: continuation?.disabledReason,
+    },
+    size,
+  });
+  const startedAt = Date.now();
+  const stream = await codexWebSocketRequest({
+    url: codexUrl,
+    headers,
+    body: wsBody,
+    ctx,
+    connectTimeoutMs: 15_000,
+    idleTimeoutMs: 300_000,
+  });
+  const elapsedMs = Date.now() - startedAt;
+  const responseHeaders = new Headers({ "content-type": "text/event-stream" });
+  ctx.traffic?.writeJson("030-upstream-response-headers", {
+    status: 200,
+    statusText: "OK",
+    elapsedMs,
+    headers: headersToRecord(responseHeaders),
+  });
+  return new Response(stream, { status: 200, headers: responseHeaders });
+}
+
+async function doFetchHttp(
+  accessToken: string,
+  accountId: string | undefined,
+  body: ResponsesRequest,
+  ctx: RequestContext,
+  log: Logger,
+): Promise<Response> {
+  const headers = codexHeaders(accessToken, accountId, ctx);
   const codexUrl = codexBaseUrl(CODEX_API_ENDPOINT);
 
   const bodyJson = JSON.stringify(body);
@@ -147,6 +268,7 @@ async function doFetch(
   ctx.traffic?.writeJson("020-upstream-request", body);
   ctx.traffic?.writeJson("021-upstream-request-metadata", {
     provider: "codex",
+    transport: "http",
     url: codexUrl,
     method: "POST",
     headers: headersToRecord(headers),
