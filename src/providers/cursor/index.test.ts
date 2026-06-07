@@ -91,6 +91,49 @@ describe("Cursor provider messages", () => {
     );
     expect(events.at(-1)?.event).toBe("message_stop");
   });
+
+  it("preserves Cursor Connect end error status for non-streaming requests", async () => {
+    const provider = createCursorProvider({
+      loadAuth: async () => ({ accessToken: "token", source: "test" }),
+      runAgent: async () =>
+        streamFromChunks([
+          encodeConnectFrame(
+            jsonBytes({
+              error: {
+                code: "resource_exhausted",
+                message: "Error",
+                details: [
+                  {
+                    debug: {
+                      details: {
+                        additionalInfo: {
+                          chatMessage: "You've hit your free requests limit.",
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            }),
+            2,
+          ),
+        ]),
+      proto: fakeProto,
+    });
+
+    const response = await provider.handleMessages(
+      {
+        model: "cursor",
+        messages: [{ role: "user", content: "hello" }],
+      },
+      fakeCtx(),
+    );
+    const body = (await response.json()) as { error: { message: string } };
+
+    expect(response.status).toBe(429);
+    expect(body.error.message).toContain("resource_exhausted");
+    expect(body.error.message).toContain("free requests limit");
+  });
 });
 
 function fakeCtx(): RequestContext {

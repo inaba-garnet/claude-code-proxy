@@ -51,7 +51,7 @@ export async function accumulateCursorResponse(
   let usage: CursorUsage | undefined;
   let cursorSessionId: string | undefined;
 
-  for await (const event of decodeCursorStream(upstream, opts.proto)) {
+  for await (const event of decodeCursorStream(upstream, opts.proto, { traffic: opts.traffic, log: opts.log })) {
     opts.traffic?.writeJsonEvent("040-cursor-event", event);
     switch (event.type) {
       case "session":
@@ -188,7 +188,7 @@ export function translateCursorStream(
 
       try {
         let finalUsage: CursorUsage | undefined;
-        for await (const event of decodeCursorStream(upstream, opts.proto)) {
+        for await (const event of decodeCursorStream(upstream, opts.proto, { traffic: opts.traffic, log: opts.log })) {
           opts.traffic?.writeJsonEvent("040-cursor-event", event);
           if (opts.signal?.aborted) return;
           switch (event.type) {

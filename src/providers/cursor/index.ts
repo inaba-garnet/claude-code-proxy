@@ -148,6 +148,10 @@ async function handleMessages(
     });
   } catch (err) {
     log.warn("cursor accumulate error", { err: String(err) });
+    if (err instanceof CursorError) {
+      const type = err.status === 401 || err.status === 403 ? "authentication_error" : "api_error";
+      return jsonError(err.status, type, err.detail || err.message);
+    }
     return jsonError(502, "api_error", String(err));
   }
 }

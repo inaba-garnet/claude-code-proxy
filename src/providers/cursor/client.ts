@@ -1,7 +1,10 @@
 import { gunzipSync } from "node:zlib";
 import http2 from "node:http2";
+import { readFile, stat } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import { cursorBaseUrl, cursorClientVersion } from "../../config.ts";
-import type { RequestContext } from "../types.ts";
+import type { RequestContext, TrafficCapture } from "../types.ts";
+import type { Logger } from "../../log.ts";
 import type { CursorProto } from "./proto-loader.ts";
 import { loadCursorProto } from "./proto-loader.ts";
 import type { CursorAuth } from "./auth/token-store.ts";
@@ -63,6 +66,7 @@ export class CursorError extends Error {
 }
 
 const HEARTBEAT_INTERVAL_MS = 5_000;
+const OUTPUT_IDLE_TIMEOUT_MS = 30_000;
 
 export async function runCursorAgent(opts: CursorRunOptions): Promise<ReadableStream<Uint8Array>> {
   const proto = opts.proto ?? loadCursorProto();
@@ -125,31 +129,54 @@ export async function runCursorAgent(opts: CursorRunOptions): Promise<ReadableSt
     });
   }, HEARTBEAT_INTERVAL_MS);
 
-  const abort = () => {
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
     clearInterval(heartbeat);
+    opts.ctx.signal.removeEventListener("abort", cleanup);
     runStream.close();
   };
-  opts.ctx.signal.addEventListener("abort", abort, { once: true });
+  opts.ctx.signal.addEventListener("abort", cleanup, { once: true });
 
   const response = await runStream.status;
   if (response.status < 200 || response.status >= 300) {
-    abort();
+    cleanup();
     throw new CursorError(response.status, `Cursor AgentService/Run failed with HTTP ${response.status}`, response.detail);
   }
 
-  return runStream.readable.pipeThrough(
+  const transformed = runStream.readable.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
       async transform(chunk, controller) {
+        opts.ctx.traffic?.writeBytes("030-cursor-run-response-chunk", chunk);
         controller.enqueue(chunk);
-        await processServerControlFrames(chunk, proto, append);
+        await processServerControlFrames(chunk, proto, append, opts.ctx);
       },
       flush() {
-        clearInterval(heartbeat);
-        opts.ctx.signal.removeEventListener("abort", abort);
-        runStream.close();
+        cleanup();
       },
     }),
   );
+  return readableWithCleanup(transformed, cleanup);
+}
+
+function readableWithCleanup(stream: ReadableStream<Uint8Array>, cleanup: () => void): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) {
+        cleanup();
+        controller.close();
+        return;
+      }
+      if (value) controller.enqueue(value);
+    },
+    async cancel(reason) {
+      cleanup();
+      await reader.cancel(reason);
+    },
+  });
 }
 
 export async function openHttp2RunStream(opts: {
@@ -212,28 +239,48 @@ export async function openHttp2RunStream(opts: {
 
   const readable = new ReadableStream<Uint8Array>({
     start(controller) {
+      let readableClosed = false;
+      const safeCloseReadable = () => {
+        if (readableClosed) return;
+        readableClosed = true;
+        try {
+          controller.close();
+        } catch {
+          // The downstream consumer may have canceled the ReadableStream first.
+        }
+      };
+      const safeErrorReadable = (err: unknown) => {
+        if (readableClosed) return;
+        readableClosed = true;
+        try {
+          controller.error(err);
+        } catch {
+          // The downstream consumer may have canceled the ReadableStream first.
+        }
+      };
       stream.on("data", (chunk: Buffer) => {
         if (responseStatus >= 400) {
           errorDetail += chunk.toString("utf8");
           return;
         }
+        if (readableClosed) return;
         controller.enqueue(new Uint8Array(chunk));
       });
       stream.once("end", () => {
         if (responseStatus >= 400) {
           resolveStatus({ status: responseStatus, detail: errorDetail || undefined });
         }
-        controller.close();
+        safeCloseReadable();
         session.close();
       });
       stream.once("error", (err) => {
         rejectStatus(err instanceof Error ? err : new Error(String(err)));
-        controller.error(err);
+        safeErrorReadable(err);
         session.destroy();
       });
       session.once("error", (err) => {
         rejectStatus(err instanceof Error ? err : new Error(String(err)));
-        controller.error(err);
+        safeErrorReadable(err);
       });
     },
     cancel() {
@@ -270,6 +317,7 @@ async function processServerControlFrames(
   chunk: Uint8Array,
   proto: CursorProto,
   append: (messageJson: unknown) => Promise<void>,
+  ctx?: RequestContext,
 ): Promise<void> {
   const state = controlFrameState.get(append) ?? {
     buffer: Buffer.alloc(0),
@@ -287,6 +335,9 @@ async function processServerControlFrames(
     if (flags & 1) payload = gunzipSync(payload);
     if (flags & 2) continue;
     const message = proto.AgentServerMessage.fromBinary(payload) as unknown as CursorOneofMessage;
+    const summary = summarizeCursorOneofMessage(message);
+    ctx?.traffic?.writeJsonEvent("035-cursor-server-message", summary);
+    ctx?.childLogger("cursor.client").debug("cursor server message", summary);
     const oneof = message.message;
     if (oneof?.case === "execServerMessage") {
       if (!state.execHeartbeatSent) {
@@ -297,6 +348,14 @@ async function processServerControlFrames(
         state.requestContextAcked = true;
         await append({ execClientMessage: buildRequestContextResult(oneof.value) });
         await append({ execClientControlMessage: { streamClose: {} } });
+      } else if (oneof.value?.message?.case === "readArgs") {
+        await append({ execClientMessage: await buildReadResult(oneof.value) });
+        await append({ execClientControlMessage: { streamClose: { id: oneof.value.id } } });
+      } else if (oneof.value?.message?.case === "grepArgs") {
+        await append({ execClientMessage: await buildGrepResult(oneof.value) });
+        await append({ execClientControlMessage: { streamClose: { id: oneof.value.id } } });
+      } else if (oneof.value?.message?.case === "shellStreamArgs") {
+        await runShellStream(oneof.value, append);
       }
     } else if (oneof?.case === "kvServerMessage") {
       const kv = oneof.value;
@@ -311,6 +370,210 @@ async function processServerControlFrames(
       }
     }
   }
+}
+
+async function buildReadResult(exec: {
+  id?: number;
+  execId?: string;
+  message?: { case?: string; value?: unknown };
+}): Promise<Record<string, unknown>> {
+  const args = asRecord(exec.message?.value);
+  const requestedPath = typeof args?.path === "string" ? args.path : "";
+  let content = "";
+  let fileSize = "0";
+  let totalLines = 0;
+  try {
+    content = await readFile(requestedPath, "utf8");
+    const fileStat = await stat(requestedPath);
+    fileSize = String(fileStat.size);
+    totalLines = content.length === 0 ? 0 : content.split("\n").length;
+  } catch (err) {
+    content = `Error reading ${requestedPath}: ${err instanceof Error ? err.message : String(err)}`;
+    fileSize = String(Buffer.byteLength(content, "utf8"));
+    totalLines = 1;
+  }
+  return {
+    ...(typeof exec.id === "number" ? { id: exec.id } : {}),
+    ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+    readResult: {
+      success: {
+        path: requestedPath,
+        content,
+        totalLines,
+        fileSize,
+      },
+    },
+  };
+}
+
+async function runShellStream(
+  exec: {
+    id?: number;
+    execId?: string;
+    message?: { case?: string; value?: unknown };
+  },
+  append: (messageJson: unknown) => Promise<void>,
+): Promise<void> {
+  const args = asRecord(exec.message?.value);
+  const command = typeof args?.command === "string" ? args.command : "";
+  const workingDirectory = typeof args?.workingDirectory === "string" && args.workingDirectory
+    ? args.workingDirectory
+    : process.cwd();
+  const timeoutMs = typeof args?.timeout === "number" && args.timeout > 0 ? args.timeout : 30_000;
+  const started = Date.now();
+  await append({ execClientMessage: buildShellStream(exec, { start: {} }) });
+
+  let timedOut = false;
+  const proc = Bun.spawn(["/bin/sh", "-lc", command], {
+    cwd: workingDirectory,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    proc.kill("SIGTERM");
+  }, timeoutMs);
+  try {
+    const [exitCode] = await Promise.all([
+      proc.exited,
+      appendShellOutput(exec, proc.stdout, "stdout", append),
+      appendShellOutput(exec, proc.stderr, "stderr", append),
+    ]);
+    await append({
+      execClientMessage: buildShellStream(exec, {
+        exit: {
+          code: exitCode,
+          cwd: workingDirectory,
+          aborted: timedOut,
+          ...(timedOut ? { abortReason: "ABORT_REASON_TIMEOUT" } : {}),
+          localExecutionTimeMs: Date.now() - started,
+        },
+      }),
+    });
+  } catch (err) {
+    await append({
+      execClientMessage: buildShellStream(exec, {
+        stderr: {
+          data: `Shell execution failed: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      }),
+    });
+    await append({
+      execClientMessage: buildShellStream(exec, {
+        exit: {
+          code: 1,
+          cwd: workingDirectory,
+          localExecutionTimeMs: Date.now() - started,
+        },
+      }),
+    });
+  } finally {
+    clearTimeout(timeout);
+    await append({ execClientControlMessage: { streamClose: { id: exec.id } } });
+  }
+}
+
+async function appendShellOutput(
+  exec: { id?: number; execId?: string },
+  stream: ReadableStream<Uint8Array> | null,
+  streamName: "stdout" | "stderr",
+  append: (messageJson: unknown) => Promise<void>,
+): Promise<void> {
+  if (!stream) return;
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      const data = decoder.decode(value, { stream: true });
+      if (data) await append({ execClientMessage: buildShellStream(exec, { [streamName]: { data } }) });
+    }
+    const rest = decoder.decode();
+    if (rest) await append({ execClientMessage: buildShellStream(exec, { [streamName]: { data: rest } }) });
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function buildShellStream(
+  exec: { id?: number; execId?: string },
+  shellStream: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...(typeof exec.id === "number" ? { id: exec.id } : {}),
+    ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+    shellStream,
+  };
+}
+
+async function buildGrepResult(exec: {
+  id?: number;
+  execId?: string;
+  message?: { case?: string; value?: unknown };
+}): Promise<Record<string, unknown>> {
+  const args = asRecord(exec.message?.value);
+  const path = typeof args?.path === "string" && args.path ? args.path : process.cwd();
+  const pattern = typeof args?.pattern === "string" ? args.pattern : "";
+  const glob = typeof args?.glob === "string" ? args.glob : "";
+  const outputMode = typeof args?.outputMode === "string" && args.outputMode ? args.outputMode : "files_with_matches";
+  const resultPattern = pattern || glob;
+  let files: string[] = [];
+  try {
+    if (glob) {
+      const globber = new Bun.Glob(glob);
+      files = Array.from(globber.scanSync(path)).sort();
+    } else if (pattern) {
+      files = await grepFilesWithRg(pattern, path);
+    }
+  } catch (err) {
+    return {
+      ...(typeof exec.id === "number" ? { id: exec.id } : {}),
+      ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+      grepResult: {
+        error: {
+          error: err instanceof Error ? err.message : String(err),
+        },
+      },
+    };
+  }
+  return {
+    ...(typeof exec.id === "number" ? { id: exec.id } : {}),
+    ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+    grepResult: {
+      success: {
+        pattern: resultPattern,
+        path,
+        outputMode,
+        workspaceResults: {
+          [path]: {
+            files: {
+              files,
+              totalFiles: files.length,
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+async function grepFilesWithRg(pattern: string, path: string): Promise<string[]> {
+  const proc = Bun.spawn(["rg", "-l", pattern, path], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const stdout = await new Response(proc.stdout).text();
+  const code = await proc.exited;
+  if (code !== 0 && code !== 1) {
+    throw new Error(`rg exited with status ${code}`);
+  }
+  return stdout
+    .split("\n")
+    .map((file) => (isAbsolute(file) ? file : join(path, file)))
+    .filter((file) => file.length > 0)
+    .sort();
 }
 
 function buildRequestContextResult(exec: {
@@ -362,15 +625,54 @@ interface CursorOneofMessage {
   };
 }
 
+function summarizeCursorOneofMessage(message: CursorOneofMessage): Record<string, unknown> {
+  const oneof = message.message;
+  const value = oneof?.value;
+  return {
+    case: oneof?.case ?? "unknown",
+    innerCase: value?.message?.case,
+    id: value?.id,
+    execId: value?.execId,
+  };
+}
+
+function summarizeCursorServerJson(json: unknown): Record<string, unknown> {
+  if (!isRecord(json)) return { type: typeof json };
+  const interaction = asRecord(json.interactionUpdate);
+  const exec = asRecord(json.execServerMessage);
+  const kv = asRecord(json.kvServerMessage);
+  return {
+    keys: Object.keys(json),
+    interactionKeys: interaction ? Object.keys(interaction) : undefined,
+    execKeys: exec ? Object.keys(exec) : undefined,
+    kvKeys: kv ? Object.keys(kv) : undefined,
+  };
+}
+
 export async function* decodeCursorStream(
   body: ReadableStream<Uint8Array>,
   proto: CursorProto = loadCursorProto(),
+  opts: DecodeCursorStreamOptions = {},
 ): AsyncGenerator<CursorStreamEvent> {
   let buffer = Buffer.alloc(0);
   const reader = body.getReader();
+  let outputSeen = false;
   try {
     while (true) {
-      const { value, done } = await reader.read();
+      const idleMs = opts.outputIdleTimeoutMs ?? OUTPUT_IDLE_TIMEOUT_MS;
+      const read = await readWithOutputIdleTimeout(reader, outputSeen ? idleMs : undefined);
+      if (read === "idle") {
+        opts.log?.warn("cursor stream idle after output", { idleMs });
+        opts.traffic?.writeJsonEvent("040-cursor-event", {
+          type: "end",
+          reason: "output_idle_timeout",
+          idleMs,
+        });
+        yield { type: "end" };
+        await reader.cancel("Cursor output idle timeout");
+        return;
+      }
+      const { value, done } = read;
       if (done) break;
       if (!value?.byteLength) continue;
       buffer = Buffer.concat([buffer, Buffer.from(value)]);
@@ -382,17 +684,94 @@ export async function* decodeCursorStream(
         buffer = buffer.subarray(5 + len);
         if (flags & 1) payload = gunzipSync(payload);
         if (flags & 2) {
+          const connectError = cursorConnectEndError(payload);
+          if (connectError) {
+            opts.log?.warn("cursor connect end error", {
+              status: connectError.status,
+              message: connectError.message,
+            });
+            opts.traffic?.writeJsonEvent("040-cursor-event", {
+              type: "error",
+              status: connectError.status,
+              message: connectError.message,
+              detail: connectError.detail,
+            });
+            throw connectError;
+          }
           yield { type: "end" };
-          continue;
+          await reader.cancel("Cursor Connect end frame");
+          return;
         }
         const decoded = safeToJson(proto.AgentServerMessage.fromBinary(payload));
         if (!decoded) continue;
-        yield* eventsFromServerMessage(decoded);
+        opts.traffic?.writeJsonEvent("039-cursor-server-message", summarizeCursorServerJson(decoded));
+        for (const event of eventsFromServerMessage(decoded)) {
+          if (event.type === "thinking_delta" || event.type === "text_delta" || event.type === "usage") {
+            outputSeen = true;
+          }
+          yield event;
+          if (event.type === "end") {
+            await reader.cancel("Cursor turnEnded frame");
+            return;
+          }
+        }
       }
     }
   } finally {
     reader.releaseLock();
   }
+}
+
+export interface DecodeCursorStreamOptions {
+  outputIdleTimeoutMs?: number;
+  traffic?: TrafficCapture;
+  log?: Logger;
+}
+
+async function readWithOutputIdleTimeout(
+  reader: { read(): Promise<CursorReadResult> },
+  idleMs: number | undefined,
+): Promise<CursorReadResult | "idle"> {
+  if (!idleMs || idleMs <= 0) return reader.read();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<"idle">((resolve) => {
+        timeout = setTimeout(() => resolve("idle"), idleMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+type CursorReadResult = { done: false; value: Uint8Array } | { done: true; value?: Uint8Array };
+
+function cursorConnectEndError(payload: Buffer): CursorError | undefined {
+  if (payload.byteLength === 0) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload.toString("utf8"));
+  } catch {
+    return undefined;
+  }
+  const error = asRecord(asRecord(parsed)?.error);
+  if (!error) return undefined;
+  const code = typeof error.code === "string" ? error.code : "unknown";
+  const message = typeof error.message === "string" ? error.message : "Cursor Connect error";
+  const details = Array.isArray(error.details) ? error.details : [];
+  const debugDetails = details
+    .map((detail) => asRecord(asRecord(detail)?.debug))
+    .map((debug) => asRecord(debug?.details))
+    .find((detail) => detail);
+  const additionalInfo = asRecord(debugDetails?.additionalInfo);
+  const friendly = stringValue(additionalInfo?.chatMessage) ||
+    stringValue(debugDetails?.title) ||
+    stringValue(debugDetails?.detail) ||
+    message;
+  const status = code === "resource_exhausted" ? 429 : 502;
+  return new CursorError(status, `Cursor Run failed: ${code}: ${friendly}`, JSON.stringify(parsed));
 }
 
 function* eventsFromServerMessage(json: unknown): Generator<CursorStreamEvent> {
@@ -424,6 +803,7 @@ function* eventsFromServerMessage(json: unknown): Generator<CursorStreamEvent> {
         cacheWriteTokens: stringToken(turnEnded.cacheWriteTokens),
       },
     };
+    yield { type: "end" };
   }
 }
 
@@ -487,6 +867,10 @@ function stringToken(value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number") return String(value);
   return "0";
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
