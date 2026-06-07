@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   loadConfig,
+  getConfig,
+  configPath as resolveConfigPath,
+  configOverrideSummaryLines,
   port,
   codexOriginator,
   codexUserAgent,
@@ -315,5 +318,184 @@ describe("malformed config", () => {
   it("returns defaults when file is missing entirely", () => {
     setEnv({});
     expect(port()).toBe(18765);
+  });
+});
+
+describe("config summary", () => {
+  it("resolves config.json under the configured directory", () => {
+    expect(resolveConfigPath("/tmp/ccp-config")).toBe(join("/tmp/ccp-config", "config.json"));
+  });
+
+  it("returns no override lines for defaults", () => {
+    setEnv({});
+    expect(configOverrideSummaryLines(getConfig())).toEqual([]);
+  });
+
+  it("summarizes file override lines with existing labels", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        codex: {
+          originator: "file-originator",
+          userAgent: "file-codex-ua",
+          model: "gpt-5.2",
+          effort: "high",
+          serviceTier: "flex",
+          baseUrl: "https://codex-file.example.com",
+          transport: "http",
+          previousResponseId: false,
+        },
+        kimi: {
+          userAgent: "file-kimi-ua",
+          oauthHost: "https://kimi-auth-file.example.com",
+          baseUrl: "https://kimi-file.example.com",
+        },
+        cursor: {
+          baseUrl: "https://cursor-file.example.com",
+          clientVersion: "cli-file",
+          agentBundle: "/file/index.js",
+        },
+        aliasProvider: "kimi",
+        log: { verbose: true, stderr: true },
+      }),
+    );
+    setEnv({});
+
+    expect(configOverrideSummaryLines(getConfig())).toEqual([
+      "codex.originator (config)",
+      "codex.userAgent (config)",
+      "kimi.userAgent (config)",
+      "codex.model (config)",
+      "codex.effort (config)",
+      "codex.serviceTier (config)",
+      "codex.baseUrl (config)",
+      "codex.transport=http (config)",
+      "codex.previousResponseId=false (config)",
+      "aliasProvider=kimi (config)",
+      "log.verbose (config)",
+      "log.stderr (config)",
+      "kimi.oauthHost (config)",
+      "kimi.baseUrl (config)",
+      "cursor.baseUrl (config)",
+      "cursor.clientVersion (config)",
+      "cursor.agentBundle (config)",
+    ]);
+  });
+
+  it("summarizes env override lines with current precedence and display values", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        codex: {
+          originator: "file-originator",
+          userAgent: "file-codex-ua",
+          model: "gpt-5.2",
+          effort: "high",
+          serviceTier: "flex",
+          baseUrl: "https://codex-file.example.com",
+          transport: "http",
+          previousResponseId: false,
+        },
+        kimi: {
+          userAgent: "file-kimi-ua",
+          oauthHost: "https://kimi-auth-file.example.com",
+          baseUrl: "https://kimi-file.example.com",
+        },
+        cursor: {
+          baseUrl: "https://cursor-file.example.com",
+          clientVersion: "cli-file",
+          agentBundle: "/file/index.js",
+        },
+        aliasProvider: "kimi",
+        log: { verbose: true, stderr: false },
+      }),
+    );
+    setEnv({
+      CCP_CODEX_ORIGINATOR: "env-originator",
+      CCP_CODEX_USER_AGENT: "env-codex-ua",
+      CCP_KIMI_USER_AGENT: "env-kimi-ua",
+      CCP_CODEX_MODEL: "gpt-5.5",
+      CCP_CODEX_EFFORT: "medium",
+      CCP_CODEX_SERVICE_TIER: "fast",
+      CCP_CODEX_BASE_URL: "https://codex-env.example.com",
+      CCP_CODEX_TRANSPORT: "auto",
+      CCP_CODEX_PREVIOUS_RESPONSE_ID: "true",
+      CCP_ALIAS_PROVIDER: "codex",
+      CCP_LOG_VERBOSE: "0",
+      CCP_LOG_STDERR: "",
+      CCP_KIMI_OAUTH_HOST: "https://kimi-auth-env.example.com",
+      CCP_KIMI_BASE_URL: "https://kimi-env.example.com",
+      CCP_CURSOR_BASE_URL: "https://cursor-env.example.com",
+      CCP_CURSOR_CLIENT_VERSION: "cli-env",
+      CCP_CURSOR_AGENT_BUNDLE: "/env/index.js",
+    });
+
+    expect(configOverrideSummaryLines(getConfig())).toEqual([
+      "CCP_CODEX_ORIGINATOR (env)",
+      "CCP_CODEX_USER_AGENT (env)",
+      "CCP_KIMI_USER_AGENT (env)",
+      "CCP_CODEX_MODEL (env)",
+      "CCP_CODEX_EFFORT (env)",
+      "CCP_CODEX_SERVICE_TIER (env)",
+      "CCP_CODEX_BASE_URL (env)",
+      "CCP_CODEX_TRANSPORT=auto (env)",
+      "CCP_CODEX_PREVIOUS_RESPONSE_ID=true (env)",
+      "CCP_ALIAS_PROVIDER=codex (env)",
+      "CCP_LOG_VERBOSE (env)",
+      "CCP_LOG_STDERR (env)",
+      "CCP_KIMI_OAUTH_HOST (env)",
+      "CCP_KIMI_BASE_URL (env)",
+      "CCP_CURSOR_BASE_URL=https://cursor-env.example.com (env)",
+      "CCP_CURSOR_CLIENT_VERSION=cli-env (env)",
+      "CCP_CURSOR_AGENT_BUNDLE (env)",
+    ]);
+  });
+
+  it("preserves current empty-string display semantics", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        codex: { model: "gpt-5.2", transport: "http", previousResponseId: true },
+        aliasProvider: "kimi",
+        cursor: { baseUrl: "https://cursor-file.example.com" },
+      }),
+    );
+    setEnv({
+      CCP_CODEX_MODEL: "",
+      CCP_CODEX_TRANSPORT: "",
+      CCP_CODEX_PREVIOUS_RESPONSE_ID: "",
+      CCP_ALIAS_PROVIDER: "",
+      CCP_LOG_STDERR: "",
+      CCP_CURSOR_BASE_URL: "",
+    });
+
+    expect(configOverrideSummaryLines(getConfig())).toEqual([
+      "codex.model (config)",
+      "codex.transport=http (config)",
+      "CCP_CODEX_PREVIOUS_RESPONSE_ID=true (env)",
+      "aliasProvider=kimi (config)",
+      "CCP_LOG_STDERR (env)",
+      "cursor.baseUrl (config)",
+    ]);
+  });
+
+  it("summarizes generic CCP_USER_AGENT fallback once in the existing position", () => {
+    setEnv({ CCP_USER_AGENT: "generic-env" });
+
+    expect(configOverrideSummaryLines(getConfig())).toEqual(["CCP_USER_AGENT (env)"]);
+  });
+
+  it("uses the supplied loaded config instead of the module cache", () => {
+    setEnv({ CCP_CODEX_TRANSPORT: "http", CCP_CURSOR_CLIENT_VERSION: "cached" });
+
+    const supplied = loadConfig({
+      configPath,
+      env: { CCP_CODEX_TRANSPORT: "auto", CCP_CURSOR_CLIENT_VERSION: "supplied" },
+    });
+
+    expect(configOverrideSummaryLines(supplied)).toEqual([
+      "CCP_CODEX_TRANSPORT=auto (env)",
+      "CCP_CURSOR_CLIENT_VERSION=supplied (env)",
+    ]);
   });
 });

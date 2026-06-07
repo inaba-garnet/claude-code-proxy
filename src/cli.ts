@@ -3,16 +3,10 @@ import { startServer } from "./server.ts";
 import { createLogger, logFile } from "./log.ts";
 import {
   port as configPort,
-  getConfig,
-  aliasProvider as configAliasProvider,
-  codexTransport,
-  codexPreviousResponseId,
-  cursorBaseUrl,
-  cursorClientVersion,
+  configPath,
+  configOverrideSummaryLines,
 } from "./config.ts";
-import { configDir } from "./paths.ts";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
 import {
   allSupportedModels,
   getProvider,
@@ -126,72 +120,12 @@ function printSupportedModels(): void {
 }
 
 function printConfigSummary(): void {
-  const cfg = getConfig();
-  const fromFile = cfg.file;
-  const overrides: string[] = [];
-
-  const configPath = join(configDir(), "config.json");
-  if (existsSync(configPath)) {
-    console.log(`Config: ${configPath}`);
+  const path = configPath();
+  if (existsSync(path)) {
+    console.log(`Config: ${path}`);
   }
 
-  if (cfg.env.CCP_CODEX_ORIGINATOR) overrides.push("CCP_CODEX_ORIGINATOR (env)");
-  else if (fromFile.codex?.originator) overrides.push("codex.originator (config)");
-
-  if (cfg.env.CCP_CODEX_USER_AGENT) overrides.push("CCP_CODEX_USER_AGENT (env)");
-  else if (cfg.env.CCP_USER_AGENT) overrides.push("CCP_USER_AGENT (env)");
-  else if (fromFile.codex?.userAgent) overrides.push("codex.userAgent (config)");
-
-  if (cfg.env.CCP_KIMI_USER_AGENT) overrides.push("CCP_KIMI_USER_AGENT (env)");
-  else if (fromFile.kimi?.userAgent) overrides.push("kimi.userAgent (config)");
-
-  if (cfg.env.CCP_CODEX_MODEL) overrides.push("CCP_CODEX_MODEL (env)");
-  else if (fromFile.codex?.model) overrides.push("codex.model (config)");
-
-  if (cfg.env.CCP_CODEX_EFFORT) overrides.push("CCP_CODEX_EFFORT (env)");
-  else if (fromFile.codex?.effort) overrides.push("codex.effort (config)");
-
-  if (cfg.env.CCP_CODEX_SERVICE_TIER) overrides.push("CCP_CODEX_SERVICE_TIER (env)");
-  else if (fromFile.codex?.serviceTier) overrides.push("codex.serviceTier (config)");
-
-  if (cfg.env.CCP_CODEX_BASE_URL) overrides.push("CCP_CODEX_BASE_URL (env)");
-  else if (fromFile.codex?.baseUrl) overrides.push("codex.baseUrl (config)");
-
-  if (cfg.env.CCP_CODEX_TRANSPORT) overrides.push(`CCP_CODEX_TRANSPORT=${codexTransport()} (env)`);
-  else if (fromFile.codex?.transport)
-    overrides.push(`codex.transport=${fromFile.codex.transport} (config)`);
-
-  if (cfg.env.CCP_CODEX_PREVIOUS_RESPONSE_ID !== undefined)
-    overrides.push(`CCP_CODEX_PREVIOUS_RESPONSE_ID=${codexPreviousResponseId()} (env)`);
-  else if (fromFile.codex?.previousResponseId !== undefined)
-    overrides.push(`codex.previousResponseId=${fromFile.codex.previousResponseId} (config)`);
-
-  if (cfg.env.CCP_ALIAS_PROVIDER)
-    overrides.push(`CCP_ALIAS_PROVIDER=${configAliasProvider()} (env)`);
-  else if (fromFile.aliasProvider)
-    overrides.push(`aliasProvider=${fromFile.aliasProvider} (config)`);
-
-  if (cfg.env.CCP_LOG_VERBOSE !== undefined) overrides.push("CCP_LOG_VERBOSE (env)");
-  else if (fromFile.log?.verbose) overrides.push("log.verbose (config)");
-
-  if (cfg.env.CCP_LOG_STDERR !== undefined) overrides.push("CCP_LOG_STDERR (env)");
-  else if (fromFile.log?.stderr) overrides.push("log.stderr (config)");
-
-  if (cfg.env.CCP_KIMI_OAUTH_HOST) overrides.push("CCP_KIMI_OAUTH_HOST (env)");
-  else if (fromFile.kimi?.oauthHost) overrides.push("kimi.oauthHost (config)");
-
-  if (cfg.env.CCP_KIMI_BASE_URL) overrides.push("CCP_KIMI_BASE_URL (env)");
-  else if (fromFile.kimi?.baseUrl) overrides.push("kimi.baseUrl (config)");
-
-  if (cfg.env.CCP_CURSOR_BASE_URL) overrides.push(`CCP_CURSOR_BASE_URL=${cursorBaseUrl()} (env)`);
-  else if (fromFile.cursor?.baseUrl) overrides.push("cursor.baseUrl (config)");
-
-  if (cfg.env.CCP_CURSOR_CLIENT_VERSION)
-    overrides.push(`CCP_CURSOR_CLIENT_VERSION=${cursorClientVersion()} (env)`);
-  else if (fromFile.cursor?.clientVersion) overrides.push("cursor.clientVersion (config)");
-
-  if (cfg.env.CCP_CURSOR_AGENT_BUNDLE) overrides.push("CCP_CURSOR_AGENT_BUNDLE (env)");
-  else if (fromFile.cursor?.agentBundle) overrides.push("cursor.agentBundle (config)");
+  const overrides = configOverrideSummaryLines();
 
   if (overrides.length > 0) {
     console.log("Overrides:");

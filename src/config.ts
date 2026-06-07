@@ -41,7 +41,7 @@ export interface FileConfig {
   };
 }
 
-interface LoadedConfig {
+export interface LoadedConfig {
   file: FileConfig;
   env: NodeJS.ProcessEnv;
 }
@@ -53,6 +53,10 @@ interface LoadOptions {
 }
 
 let cached: LoadedConfig | undefined;
+
+export function configPath(configDirectory = configDir()): string {
+  return join(configDirectory, "config.json");
+}
 
 // Most env-var consumers historically used `??` semantics — empty string is
 // a real value that wins. Only CCP_CODEX_MODEL and CCP_CODEX_EFFORT had
@@ -186,7 +190,7 @@ export function loadConfig(opts: LoadOptions = {}): LoadedConfig {
     return cached;
   }
   const env = opts.env ?? process.env;
-  const path = opts.configPath ?? join(configDir(), "config.json");
+  const path = opts.configPath ?? configPath();
   let file: FileConfig = {};
   try {
     const raw = readFileSync(path, "utf8");
@@ -268,30 +272,15 @@ export function codexBaseUrl(defaultValue: string): string {
 }
 
 export function codexTransport(): CodexTransport {
-  const c = getConfig();
-  return (
-    parseCodexTransport("CCP_CODEX_TRANSPORT", emptyOrUnset(c.env.CCP_CODEX_TRANSPORT)) ??
-    c.file.codex?.transport ??
-    "websocket"
-  );
+  return resolvedCodexTransport(getConfig());
 }
 
 export function codexPreviousResponseId(): boolean {
-  const c = getConfig();
-  return (
-    parseBooleanEnv(c.env.CCP_CODEX_PREVIOUS_RESPONSE_ID) ??
-    c.file.codex?.previousResponseId ??
-    false
-  );
+  return resolvedCodexPreviousResponseId(getConfig());
 }
 
 export function aliasProvider(): AliasProvider {
-  const c = getConfig();
-  return (
-    parseAliasProvider("CCP_ALIAS_PROVIDER", emptyOrUnset(c.env.CCP_ALIAS_PROVIDER)) ??
-    c.file.aliasProvider ??
-    "codex"
-  );
+  return resolvedAliasProvider(getConfig());
 }
 
 export function kimiUserAgent(defaultValue: string): string {
@@ -319,6 +308,103 @@ export function cursorBaseUrl(): string {
 export function cursorClientVersion(): string {
   const c = getConfig();
   return c.env.CCP_CURSOR_CLIENT_VERSION ?? c.file.cursor?.clientVersion ?? "cli-2026.06.04-5fd875e";
+}
+
+function resolvedCodexTransport(c: LoadedConfig): CodexTransport {
+  return (
+    parseCodexTransport("CCP_CODEX_TRANSPORT", emptyOrUnset(c.env.CCP_CODEX_TRANSPORT)) ??
+    c.file.codex?.transport ??
+    "websocket"
+  );
+}
+
+function resolvedCodexPreviousResponseId(c: LoadedConfig): boolean {
+  return (
+    parseBooleanEnv(c.env.CCP_CODEX_PREVIOUS_RESPONSE_ID) ??
+    c.file.codex?.previousResponseId ??
+    false
+  );
+}
+
+function resolvedAliasProvider(c: LoadedConfig): AliasProvider {
+  return (
+    parseAliasProvider("CCP_ALIAS_PROVIDER", emptyOrUnset(c.env.CCP_ALIAS_PROVIDER)) ??
+    c.file.aliasProvider ??
+    "codex"
+  );
+}
+
+function resolvedCursorBaseUrl(c: LoadedConfig): string {
+  return c.env.CCP_CURSOR_BASE_URL ?? c.file.cursor?.baseUrl ?? "https://api2.cursor.sh";
+}
+
+function resolvedCursorClientVersion(c: LoadedConfig): string {
+  return c.env.CCP_CURSOR_CLIENT_VERSION ?? c.file.cursor?.clientVersion ?? "cli-2026.06.04-5fd875e";
+}
+
+export function configOverrideSummaryLines(cfg: LoadedConfig = getConfig()): string[] {
+  const fromFile = cfg.file;
+  const overrides: string[] = [];
+
+  if (cfg.env.CCP_CODEX_ORIGINATOR) overrides.push("CCP_CODEX_ORIGINATOR (env)");
+  else if (fromFile.codex?.originator) overrides.push("codex.originator (config)");
+
+  if (cfg.env.CCP_CODEX_USER_AGENT) overrides.push("CCP_CODEX_USER_AGENT (env)");
+  else if (cfg.env.CCP_USER_AGENT) overrides.push("CCP_USER_AGENT (env)");
+  else if (fromFile.codex?.userAgent) overrides.push("codex.userAgent (config)");
+
+  if (cfg.env.CCP_KIMI_USER_AGENT) overrides.push("CCP_KIMI_USER_AGENT (env)");
+  else if (fromFile.kimi?.userAgent) overrides.push("kimi.userAgent (config)");
+
+  if (cfg.env.CCP_CODEX_MODEL) overrides.push("CCP_CODEX_MODEL (env)");
+  else if (fromFile.codex?.model) overrides.push("codex.model (config)");
+
+  if (cfg.env.CCP_CODEX_EFFORT) overrides.push("CCP_CODEX_EFFORT (env)");
+  else if (fromFile.codex?.effort) overrides.push("codex.effort (config)");
+
+  if (cfg.env.CCP_CODEX_SERVICE_TIER) overrides.push("CCP_CODEX_SERVICE_TIER (env)");
+  else if (fromFile.codex?.serviceTier) overrides.push("codex.serviceTier (config)");
+
+  if (cfg.env.CCP_CODEX_BASE_URL) overrides.push("CCP_CODEX_BASE_URL (env)");
+  else if (fromFile.codex?.baseUrl) overrides.push("codex.baseUrl (config)");
+
+  if (cfg.env.CCP_CODEX_TRANSPORT)
+    overrides.push(`CCP_CODEX_TRANSPORT=${resolvedCodexTransport(cfg)} (env)`);
+  else if (fromFile.codex?.transport)
+    overrides.push(`codex.transport=${fromFile.codex.transport} (config)`);
+
+  if (cfg.env.CCP_CODEX_PREVIOUS_RESPONSE_ID !== undefined)
+    overrides.push(`CCP_CODEX_PREVIOUS_RESPONSE_ID=${resolvedCodexPreviousResponseId(cfg)} (env)`);
+  else if (fromFile.codex?.previousResponseId !== undefined)
+    overrides.push(`codex.previousResponseId=${fromFile.codex.previousResponseId} (config)`);
+
+  if (cfg.env.CCP_ALIAS_PROVIDER) overrides.push(`CCP_ALIAS_PROVIDER=${resolvedAliasProvider(cfg)} (env)`);
+  else if (fromFile.aliasProvider) overrides.push(`aliasProvider=${fromFile.aliasProvider} (config)`);
+
+  if (cfg.env.CCP_LOG_VERBOSE !== undefined) overrides.push("CCP_LOG_VERBOSE (env)");
+  else if (fromFile.log?.verbose) overrides.push("log.verbose (config)");
+
+  if (cfg.env.CCP_LOG_STDERR !== undefined) overrides.push("CCP_LOG_STDERR (env)");
+  else if (fromFile.log?.stderr) overrides.push("log.stderr (config)");
+
+  if (cfg.env.CCP_KIMI_OAUTH_HOST) overrides.push("CCP_KIMI_OAUTH_HOST (env)");
+  else if (fromFile.kimi?.oauthHost) overrides.push("kimi.oauthHost (config)");
+
+  if (cfg.env.CCP_KIMI_BASE_URL) overrides.push("CCP_KIMI_BASE_URL (env)");
+  else if (fromFile.kimi?.baseUrl) overrides.push("kimi.baseUrl (config)");
+
+  if (cfg.env.CCP_CURSOR_BASE_URL)
+    overrides.push(`CCP_CURSOR_BASE_URL=${resolvedCursorBaseUrl(cfg)} (env)`);
+  else if (fromFile.cursor?.baseUrl) overrides.push("cursor.baseUrl (config)");
+
+  if (cfg.env.CCP_CURSOR_CLIENT_VERSION)
+    overrides.push(`CCP_CURSOR_CLIENT_VERSION=${resolvedCursorClientVersion(cfg)} (env)`);
+  else if (fromFile.cursor?.clientVersion) overrides.push("cursor.clientVersion (config)");
+
+  if (cfg.env.CCP_CURSOR_AGENT_BUNDLE) overrides.push("CCP_CURSOR_AGENT_BUNDLE (env)");
+  else if (fromFile.cursor?.agentBundle) overrides.push("cursor.agentBundle (config)");
+
+  return overrides;
 }
 
 export function cursorAgentBundle(): string | undefined {
