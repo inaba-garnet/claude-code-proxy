@@ -2,7 +2,8 @@
 
 `claude-code-proxy` lets you use
 [Claude Code](https://www.anthropic.com/claude-code) with your **ChatGPT
-Plus/Pro** subscription or your **Kimi Code** (kimi.com) account.
+Plus/Pro** subscription, your **Kimi Code** (kimi.com) account, or **Cursor
+Agent**.
 
 <img src="meta/claude-code-screenshot.webp" alt="Claude Code running through claude-code-proxy" width="630" />
 
@@ -45,7 +46,7 @@ artifacts are published as `claude-code-proxy-windows-amd64.zip` and
 
 ### 2. Pick a provider and authenticate
 
-The proxy supports two upstream providers. Pick one and run its login flow; the
+The proxy supports three upstream providers. Pick one and run its login flow; the
 proxy will refuse to start traffic until a token is stored.
 
 **Codex (ChatGPT Plus/Pro):**
@@ -67,6 +68,18 @@ claude-code-proxy kimi auth login      # device-code flow (prints URL + code)
 Sign in with your **kimi.com account**. The verification URL is displayed; open
 it in any browser, confirm the code, and the CLI polls until done.
 
+**Cursor Agent:**
+
+```sh
+cursor-agent login
+claude-code-proxy cursor auth status
+```
+
+Cursor authentication is managed by Cursor Agent. The proxy discovers the same
+stored credentials (`cursor-access-token` on macOS Keychain, or Cursor's
+`auth.json` on other platforms). You can also set `CCP_CURSOR_AUTH_TOKEN` for
+the proxy process.
+
 On macOS credentials go to Keychain. On Windows they are written under
 `%APPDATA%\claude-code-proxy\<provider>\auth.json`; on Linux they are written
 under `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/<provider>/auth.json`
@@ -77,6 +90,7 @@ Verify:
 ```sh
 claude-code-proxy codex auth status
 claude-code-proxy kimi auth status
+claude-code-proxy cursor auth status
 ```
 
 ### 3. Start the proxy
@@ -95,6 +109,7 @@ upstream for each request is chosen from `ANTHROPIC_MODEL`.
 
 - `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.4-mini`, `gpt-5.2` → **codex**
 - `kimi-for-coding`, `kimi-k2.6`, `k2.6` → **kimi**
+- `cursor`, `cursor-plan`, `cursor-ask`, `composer-2.5-fast`, `cursor:<raw-model>` → **cursor**
 
 An unknown model returns a 400 listing the supported ids. There is no
 implicit default provider.
@@ -121,6 +136,15 @@ ANTHROPIC_BASE_URL=http://localhost:18765 \
 ANTHROPIC_AUTH_TOKEN=unused \
 ANTHROPIC_MODEL=kimi-for-coding[1m] \
 ANTHROPIC_SMALL_FAST_MODEL=kimi-for-coding[1m] \
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
+  claude
+
+# Cursor Agent
+ANTHROPIC_BASE_URL=http://localhost:18765 \
+ANTHROPIC_AUTH_TOKEN=unused \
+ANTHROPIC_MODEL=cursor \
+ANTHROPIC_SMALL_FAST_MODEL=cursor \
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
   claude
@@ -291,6 +315,47 @@ Auth:
 | `kimi auth status` | Show user ID + token expiry           |
 | `kimi auth logout` | Delete stored credentials             |
 
+### Cursor Agent
+
+Upstream: `https://api2.cursor.sh/agent.v1.AgentService/Run` (Cursor Agent's
+HTTP/2 full-duplex Connect protocol). The captured HTTP/1 fallback is
+`RunSSE` plus `/aiserver.v1.BidiService/BidiAppend`; the provider now uses the
+primary HTTP/2 stream.
+
+Supported proxy model ids:
+
+- `cursor`, `cursor-agent`, `cursor-composer`, `cursor-composer-fast` — Cursor
+  Composer 2.5 fast mode
+- `cursor-plan` — same model with Cursor `AGENT_MODE_PLAN`
+- `cursor-ask` — same model with Cursor `AGENT_MODE_ASK`
+- `composer-2.5`, `composer-2.5-fast`
+- `cursor:<raw-model>` — send a raw Cursor model id, with a trailing `-fast`
+  converted into Cursor's `fast=true` model parameter
+
+Plan mode can also be selected per request with metadata:
+
+```json
+{
+  "metadata": {
+    "cursor_mode": "plan"
+  }
+}
+```
+
+Cursor continuation maps Claude Code's `x-claude-code-session-id` to a Cursor
+conversation id in memory. To resume an existing Cursor chat explicitly, set
+`metadata.cursor_chat_id`, `metadata.cursorChatId`, `metadata.cursor_resume`, or
+`metadata.cursorResume` to the Cursor chat id. The observed Cursor session id is
+recorded back into the session map when Cursor returns it.
+
+Auth:
+
+| Command              | What it does                                                        |
+| -------------------- | ------------------------------------------------------------------- |
+| `cursor auth login`  | Prints the required `cursor-agent login` command                    |
+| `cursor auth status` | Shows discovered Cursor credential source and token expiry          |
+| `cursor auth logout` | Clears discovered Cursor credentials from Cursor's local auth store |
+
 ## How it works
 
 ```mermaid
@@ -298,8 +363,8 @@ sequenceDiagram
     autonumber
     participant CC as Claude Code
     participant P as claude-code-proxy
-    participant AUTH as OAuth host<br/>(auth.openai.com or<br/>auth.kimi.com)
-    participant U as Upstream API<br/>(chatgpt.com/codex or<br/>api.kimi.com)
+    participant AUTH as OAuth host / credential store
+    participant U as Upstream API<br/>(Codex, Kimi, or Cursor)
 
     Note over P,AUTH: One-time: PKCE / device OAuth<br/>tokens cached locally for reuse
 
@@ -312,7 +377,7 @@ sequenceDiagram
 
     P->>P: translate request<br/>• strip Anthropic-only fields<br/>• system blocks → instructions / system message<br/>• tool_use / tool_result ↔ provider-specific shapes<br/>• prompt_cache_key = session id
     P->>U: POST upstream<br/>Bearer + provider-specific headers
-    U-->>P: provider SSE<br/>(Codex: output_item.*, output_text.delta, …)<br/>(Kimi: chat.completion.chunk, reasoning_content, …)
+    U-->>P: provider stream<br/>(Codex/Kimi SSE, Cursor Connect frames)
     P->>P: reducer: typed events<br/>(thinking / text / tool start/delta/stop, finish)
     P-->>CC: Anthropic SSE<br/>(message_start, content_block_*, message_delta, message_stop)
 ```
@@ -324,6 +389,7 @@ sequenceDiagram
 | [`serve`](#serve)                                   | Start the proxy on `PORT` |
 | `codex auth login` / `device` / `status` / `logout` | Codex OAuth management    |
 | `kimi  auth login` / `status` / `logout`            | Kimi OAuth management     |
+| `cursor auth login` / `status` / `logout`           | Cursor credential status  |
 
 ---
 
@@ -451,6 +517,40 @@ Removes stored auth credentials (Keychain entry on macOS, file elsewhere). Run
 
 ---
 
+### Cursor auth commands
+
+#### `cursor auth login`
+
+Cursor login is handled by Cursor Agent itself:
+
+```sh
+cursor-agent login
+```
+
+The proxy command prints that setup instruction and exits. This avoids using
+`cursor-agent` as a request upstream while still matching Cursor Agent's
+credential storage.
+
+#### `cursor auth status`
+
+```sh
+claude-code-proxy cursor auth status
+```
+
+Shows whether Cursor credentials were discovered, the source, user/email claims
+when present, and token expiry. Non-zero exit if no auth is present.
+
+#### `cursor auth logout`
+
+```sh
+claude-code-proxy cursor auth logout
+```
+
+Clears Cursor credentials from the discovered local auth store. Run
+`cursor-agent login` again to re-authenticate.
+
+---
+
 ### Endpoints
 
 The proxy speaks enough of the Anthropic API for Claude Code:
@@ -491,6 +591,11 @@ Windows, and at
     "oauthHost": "https://auth.kimi.com",
     "baseUrl": "https://api.kimi.com/coding/v1"
   },
+  "cursor": {
+    "baseUrl": "https://api2.cursor.sh",
+    "clientVersion": "cli-2026.06.04-5fd875e",
+    "agentBundle": "/path/to/cursor-agent/index.js"
+  },
   "log": {
     "stderr": false,
     "verbose": false
@@ -517,6 +622,10 @@ Windows, and at
 | `CCP_CODEX_ORIGINATOR`           | `codex.originator`         | `claude-code-proxy`                               | Override the `originator` header sent to Codex                                                                                   |
 | `CCP_CODEX_USER_AGENT`           | `codex.userAgent`          | `claude-code-proxy/<version>`                     | Override the `User-Agent` header sent to Codex                                                                                   |
 | `CCP_KIMI_USER_AGENT`            | `kimi.userAgent`           | `KimiCLI/1.37.0`                                  | Override the `User-Agent` header sent to Kimi                                                                                    |
+| `CCP_CURSOR_BASE_URL`            | `cursor.baseUrl`           | `https://api2.cursor.sh`                          | Override Cursor's API base URL                                                                                                   |
+| `CCP_CURSOR_CLIENT_VERSION`      | `cursor.clientVersion`     | `cli-2026.06.04-5fd875e`                          | Override Cursor client version headers                                                                                           |
+| `CCP_CURSOR_AGENT_BUNDLE`        | `cursor.agentBundle`       | auto-detected                                     | Path to Cursor Agent's bundled `index.js` used only for protobuf schemas                                                         |
+| `CCP_CURSOR_AUTH_TOKEN`          | —                          | unset                                             | Use this Cursor bearer token instead of local Cursor Agent credential storage                                                     |
 | `CCP_ORIGINATOR`                 | —                          | `claude-code-proxy`                               | Fallback for `CCP_CODEX_ORIGINATOR`                                                                                              |
 | `CCP_USER_AGENT`                 | —                          | unset                                             | Fallback for `CCP_CODEX_USER_AGENT` and `CCP_KIMI_USER_AGENT`                                                                    |
 
@@ -570,10 +679,16 @@ sticky sessions or shared state before enabling continuation.
   `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/kimi/device_id`; Windows
   uses `%APPDATA%\claude-code-proxy\kimi\device_id`. Reused for the lifetime
   of the install.
+- Cursor tokens — discovered from Cursor Agent's auth store, not stored under
+  `claude-code-proxy`. On macOS the provider reads Keychain account
+  `cursor-user` with services `cursor-access-token`, `cursor-refresh-token`,
+  and `cursor-api-key`. On Linux it reads
+  `${XDG_CONFIG_HOME:-$HOME/.config}/cursor/auth.json`; on Windows it reads
+  `%APPDATA%\Cursor\auth.json`. `CCP_CURSOR_AUTH_TOKEN` overrides discovery.
 
 ## Limitations
 
-- **Terms of service:** using the Codex or Kimi backends from a non-official
+- **Terms of service:** using the Codex, Kimi, or Cursor backends from a non-official
   client is a gray area. Use at your own risk.
 - **Rate limits:** shared across all clients of your upstream account. Codex's
   `codex.rate_limits.limit_reached` and Kimi's HTTP 429 are both surfaced as
@@ -595,6 +710,14 @@ sticky sessions or shared state before enabling continuation.
 - **Codex — `output_config.format`:** translated to Responses API `text.format`
   (json_schema with `strict: true`); other Anthropic-specific `output_config`
   fields are dropped.
+- **Cursor — protobuf bundle dependency:** the provider speaks Cursor's
+  underlying protocol directly, but reuses the installed Cursor Agent bundle's
+  generated protobuf classes. Set `CCP_CURSOR_AGENT_BUNDLE` if auto-detection
+  cannot find `cursor-agent`.
+- **Cursor — tool round-trips:** text, thinking, plan mode, ask mode, auth, and
+  session continuation are implemented. Full Cursor workspace/tool callbacks are
+  captured and documented under `history/`, but not yet implemented as Claude
+  tool round-trips.
 
 ## Development
 

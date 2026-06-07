@@ -2,6 +2,8 @@ import { aliasProvider, type AliasProvider } from "../config.ts";
 import type { Provider } from "./types.ts";
 import { codexProvider } from "./codex/index.ts";
 import { kimiProvider } from "./kimi/index.ts";
+import { cursorProvider } from "./cursor/index.ts";
+import { isCursorModel } from "./cursor/translate/model.ts";
 
 export const ANTHROPIC_STYLE_ALIASES = new Set([
   "haiku",
@@ -16,6 +18,7 @@ export const ANTHROPIC_STYLE_ALIASES = new Set([
 const PROVIDERS: Record<string, Provider> = {
   codex: codexProvider,
   kimi: kimiProvider,
+  cursor: cursorProvider,
 };
 
 export function getProvider(name: string): Provider {
@@ -40,6 +43,7 @@ export function providerForModel(
 ): Provider | undefined {
   if (ANTHROPIC_STYLE_ALIASES.has(model))
     return getProvider(aliasProviderOverride ?? aliasProvider());
+  if (isCursorModel(model)) return cursorProvider;
   for (const p of allProviders()) {
     if (p.supportedModels.has(model)) return p;
   }

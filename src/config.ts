@@ -30,6 +30,11 @@ export interface FileConfig {
     oauthHost?: string;
     baseUrl?: string;
   };
+  cursor?: {
+    baseUrl?: string;
+    clientVersion?: string;
+    agentBundle?: string;
+  };
   log?: {
     stderr?: boolean;
     verbose?: boolean;
@@ -102,7 +107,7 @@ function validate(raw: unknown): FileConfig {
 
   out.aliasProvider = parseAliasProvider("aliasProvider", r.aliasProvider);
 
-  const validateStringSection = <K extends "codex" | "kimi" | "log">(
+  const validateStringSection = <K extends "codex" | "kimi" | "cursor" | "log">(
     key: K,
     keys: ReadonlyArray<keyof NonNullable<FileConfig[K]>>,
     types: Record<string, "string" | "boolean">,
@@ -159,6 +164,13 @@ function validate(raw: unknown): FileConfig {
     baseUrl: "string",
   });
   if (kimi) out.kimi = kimi;
+
+  const cursor = validateStringSection("cursor", ["baseUrl", "clientVersion", "agentBundle"], {
+    baseUrl: "string",
+    clientVersion: "string",
+    agentBundle: "string",
+  });
+  if (cursor) out.cursor = cursor;
 
   const log = validateStringSection("log", ["stderr", "verbose"], {
     stderr: "boolean",
@@ -297,6 +309,21 @@ export function kimiOauthHost(): string {
 export function kimiBaseUrl(): string {
   const c = getConfig();
   return c.env.CCP_KIMI_BASE_URL ?? c.file.kimi?.baseUrl ?? "https://api.kimi.com/coding/v1";
+}
+
+export function cursorBaseUrl(): string {
+  const c = getConfig();
+  return c.env.CCP_CURSOR_BASE_URL ?? c.file.cursor?.baseUrl ?? "https://api2.cursor.sh";
+}
+
+export function cursorClientVersion(): string {
+  const c = getConfig();
+  return c.env.CCP_CURSOR_CLIENT_VERSION ?? c.file.cursor?.clientVersion ?? "cli-2026.06.04-5fd875e";
+}
+
+export function cursorAgentBundle(): string | undefined {
+  const c = getConfig();
+  return emptyOrUnset(c.env.CCP_CURSOR_AGENT_BUNDLE) ?? emptyOrUnset(c.file.cursor?.agentBundle);
 }
 
 // Additive: error/warn always go to stderr in log.ts; this getter only

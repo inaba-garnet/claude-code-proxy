@@ -17,6 +17,9 @@ import {
   kimiUserAgent,
   kimiOauthHost,
   kimiBaseUrl,
+  cursorBaseUrl,
+  cursorClientVersion,
+  cursorAgentBundle,
   logVerbose,
   logStderr,
 } from "./config.ts";
@@ -56,6 +59,9 @@ describe("config defaults", () => {
     expect(kimiUserAgent("default-kimi-ua")).toBe("default-kimi-ua");
     expect(kimiOauthHost()).toBe("https://auth.kimi.com");
     expect(kimiBaseUrl()).toBe("https://api.kimi.com/coding/v1");
+    expect(cursorBaseUrl()).toBe("https://api2.cursor.sh");
+    expect(cursorClientVersion()).toBe("cli-2026.06.04-5fd875e");
+    expect(cursorAgentBundle()).toBeUndefined();
     expect(logVerbose()).toBe(false);
     expect(logStderr()).toBe(false);
   });
@@ -113,6 +119,23 @@ describe("file overrides default", () => {
     expect(kimiOauthHost()).toBe("https://auth.example.com");
   });
 
+  it("cursor config from config.json", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        cursor: {
+          baseUrl: "https://cursor.example.com",
+          clientVersion: "cli-test",
+          agentBundle: "/tmp/cursor-agent/index.js",
+        },
+      }),
+    );
+    setEnv({});
+    expect(cursorBaseUrl()).toBe("https://cursor.example.com");
+    expect(cursorClientVersion()).toBe("cli-test");
+    expect(cursorAgentBundle()).toBe("/tmp/cursor-agent/index.js");
+  });
+
   it("log.verbose from config.json", () => {
     writeFileSync(configPath, JSON.stringify({ log: { verbose: true } }));
     setEnv({});
@@ -166,6 +189,27 @@ describe("env overrides file", () => {
     setEnv({ CCP_USER_AGENT: "generic-env" });
     expect(codexUserAgent("default")).toBe("generic-env");
     expect(kimiUserAgent("default")).toBe("generic-env");
+  });
+
+  it("Cursor env vars win over config", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        cursor: {
+          baseUrl: "https://cursor-file.example.com",
+          clientVersion: "cli-file",
+          agentBundle: "/file/index.js",
+        },
+      }),
+    );
+    setEnv({
+      CCP_CURSOR_BASE_URL: "https://cursor-env.example.com",
+      CCP_CURSOR_CLIENT_VERSION: "cli-env",
+      CCP_CURSOR_AGENT_BUNDLE: "/env/index.js",
+    });
+    expect(cursorBaseUrl()).toBe("https://cursor-env.example.com");
+    expect(cursorClientVersion()).toBe("cli-env");
+    expect(cursorAgentBundle()).toBe("/env/index.js");
   });
 
   it("logStderr env-set forces true even when config sets false", () => {

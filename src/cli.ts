@@ -7,6 +7,8 @@ import {
   aliasProvider as configAliasProvider,
   codexTransport,
   codexPreviousResponseId,
+  cursorBaseUrl,
+  cursorClientVersion,
 } from "./config.ts";
 import { configDir } from "./paths.ts";
 import { existsSync } from "node:fs";
@@ -180,6 +182,16 @@ function printConfigSummary(): void {
 
   if (cfg.env.CCP_KIMI_BASE_URL) overrides.push("CCP_KIMI_BASE_URL (env)");
   else if (fromFile.kimi?.baseUrl) overrides.push("kimi.baseUrl (config)");
+
+  if (cfg.env.CCP_CURSOR_BASE_URL) overrides.push(`CCP_CURSOR_BASE_URL=${cursorBaseUrl()} (env)`);
+  else if (fromFile.cursor?.baseUrl) overrides.push("cursor.baseUrl (config)");
+
+  if (cfg.env.CCP_CURSOR_CLIENT_VERSION)
+    overrides.push(`CCP_CURSOR_CLIENT_VERSION=${cursorClientVersion()} (env)`);
+  else if (fromFile.cursor?.clientVersion) overrides.push("cursor.clientVersion (config)");
+
+  if (cfg.env.CCP_CURSOR_AGENT_BUNDLE) overrides.push("CCP_CURSOR_AGENT_BUNDLE (env)");
+  else if (fromFile.cursor?.agentBundle) overrides.push("cursor.agentBundle (config)");
 
   if (overrides.length > 0) {
     console.log("Overrides:");

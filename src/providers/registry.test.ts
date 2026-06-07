@@ -89,5 +89,18 @@ describe("provider routing", () => {
 
     expect(providerForModel("kimi-for-coding")?.name).toBe("kimi");
     expect(providerForModel("gpt-5.4-fast")?.name).toBe("codex");
+    expect(providerForModel("cursor")?.name).toBe("cursor");
+    expect(providerForModel("cursor-plan")?.name).toBe("cursor");
+    expect(providerForModel("cursor:claude-sonnet-4-6")?.name).toBe("cursor");
+  });
+
+  it("lists Cursor aliases in supported models", () => {
+    const cursorModels = allSupportedModels()
+      .filter((entry) => entry.provider === "cursor")
+      .map((entry) => entry.model);
+
+    expect(cursorModels).toContain("cursor");
+    expect(cursorModels).toContain("cursor-plan");
+    expect(cursorModels).toContain("composer-2.5-fast");
   });
 });

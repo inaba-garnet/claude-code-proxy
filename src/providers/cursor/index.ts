@@ -1,0 +1,193 @@
+import type { AnthropicRequest } from "../../anthropic/schema.ts";
+import { wantsDownstreamStream } from "../../anthropic/stream.ts";
+import { logVerbose } from "../../config.ts";
+import type { CliHandlers, Provider, RequestContext } from "../types.ts";
+import {
+  CursorError,
+  runCursorAgent,
+  type CursorRunOptions,
+} from "./client.ts";
+import { countCursorTokens } from "./count-tokens.ts";
+import {
+  cursorAuthLocation,
+  expiredAuthMessage,
+  loadCursorAuth,
+  missingAuthMessage,
+  clearCursorAuth,
+} from "./auth/token-store.ts";
+import { renderCursorPrompt } from "./translate/request.ts";
+import { CURSOR_SUPPORTED_MODELS, resolveCursorModel } from "./translate/model.ts";
+import {
+  accumulateCursorResponse,
+  translateCursorStream,
+} from "./translate/response.ts";
+import {
+  cursorConversationForRequest,
+  recordCursorConversation,
+} from "./session.ts";
+import type { CursorAuth } from "./auth/token-store.ts";
+import type { CursorProto } from "./proto-loader.ts";
+
+const AUTH_EXPIRY_SKEW_MS = 60_000;
+
+export interface CursorProviderDeps {
+  loadAuth: () => Promise<CursorAuth | undefined>;
+  runAgent: (opts: CursorRunOptions) => Promise<ReadableStream<Uint8Array>>;
+  proto?: CursorProto;
+}
+
+const defaultDeps: CursorProviderDeps = {
+  loadAuth: () => loadCursorAuth(),
+  runAgent: runCursorAgent,
+};
+
+function jsonError(status: number, type: string, message: string): Response {
+  return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function handleCountTokens(body: AnthropicRequest, ctx: RequestContext): Promise<Response> {
+  const tokens = countCursorTokens(body);
+  ctx.childLogger("provider.cursor").debug("count_tokens", { tokens });
+  return new Response(JSON.stringify({ input_tokens: tokens }), {
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function handleMessages(
+  body: AnthropicRequest,
+  ctx: RequestContext,
+  deps: CursorProviderDeps,
+): Promise<Response> {
+  const log = ctx.childLogger("provider.cursor");
+  const messageId = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
+  const selection = resolveCursorModel(body);
+  const prompt = renderCursorPrompt(body);
+  const wantStream = wantsDownstreamStream(body);
+  const conversationId = cursorConversationForRequest(body, ctx.sessionId);
+
+  log.debug("cursor request", {
+    requestedModel: body.model,
+    resolvedModel: selection.requestedModel,
+    mode: selection.mode,
+    conversationId,
+    stream: wantStream,
+    messageCount: body.messages.length,
+    promptChars: prompt.length,
+  });
+  if (logVerbose()) log.debug("cursor prompt", { prompt });
+
+  const auth = await deps.loadAuth();
+  if (!auth) return jsonError(401, "authentication_error", missingAuthMessage());
+  if (auth.expires && auth.expires <= Date.now() + AUTH_EXPIRY_SKEW_MS) {
+    return jsonError(401, "authentication_error", expiredAuthMessage(auth));
+  }
+
+  let upstream: ReadableStream<Uint8Array>;
+  try {
+    upstream = await deps.runAgent({
+      prompt,
+      mode: selection.mode,
+      conversationId,
+      model: selection.requestedModel,
+      auth,
+      ctx,
+    });
+  } catch (err) {
+    if (err instanceof CursorError) {
+      log.warn("cursor upstream error", {
+        status: err.status,
+        message: err.message,
+        detail: err.detail,
+      });
+      const type = err.status === 401 || err.status === 403 ? "authentication_error" : "api_error";
+      return jsonError(err.status, type, err.detail || err.message);
+    }
+    throw err;
+  }
+
+  const onSession = (cursorSessionId: string) => {
+    recordCursorConversation(ctx.sessionId, cursorSessionId);
+    log.debug("cursor session observed", { cursorSessionId });
+  };
+
+  if (wantStream) {
+    const stream = translateCursorStream(upstream, {
+      messageId,
+      model: body.model,
+      log: ctx.childLogger("cursor.stream"),
+      signal: ctx.signal,
+      traffic: ctx.traffic,
+      proto: deps.proto,
+      onSession,
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      },
+    });
+  }
+
+  try {
+    const result = await accumulateCursorResponse(upstream, {
+      messageId,
+      model: body.model,
+      log: ctx.childLogger("cursor.accumulate"),
+      traffic: ctx.traffic,
+      proto: deps.proto,
+      onSession,
+    });
+    return new Response(JSON.stringify(result.response), {
+      headers: { "content-type": "application/json" },
+    });
+  } catch (err) {
+    log.warn("cursor accumulate error", { err: String(err) });
+    return jsonError(502, "api_error", String(err));
+  }
+}
+
+const cli: CliHandlers = {
+  async login() {
+    console.log("Cursor login is managed by Cursor Agent.");
+    console.log("Run: cursor-agent login");
+    console.log("Or set CCP_CURSOR_AUTH_TOKEN/CURSOR_AUTH_TOKEN for this proxy.");
+  },
+  async status() {
+    const auth = await loadCursorAuth();
+    if (!auth) {
+      console.log("Not authenticated");
+      console.log(missingAuthMessage());
+      process.exit(1);
+    }
+    console.log(`Storage: ${auth.source}`);
+    if (auth.email) console.log(`Email: ${auth.email}`);
+    if (auth.userId) console.log(`User: ${auth.userId}`);
+    if (auth.expires) {
+      const ms = auth.expires - Date.now();
+      console.log(`Expires: ${new Date(auth.expires).toISOString()} (in ${Math.floor(ms / 1000)}s)`);
+    } else {
+      console.log("Expires: unknown");
+    }
+  },
+  async logout() {
+    await clearCursorAuth();
+    console.log(`Cleared Cursor auth from ${cursorAuthLocation()}`);
+  },
+};
+
+export function createCursorProvider(deps: CursorProviderDeps = defaultDeps): Provider {
+  return {
+    name: "cursor",
+    supportedModels: CURSOR_SUPPORTED_MODELS,
+    handleMessages: (body, ctx) => handleMessages(body, ctx, deps),
+    handleCountTokens,
+    cli,
+  };
+}
+
+export const cursorProvider: Provider = createCursorProvider();
