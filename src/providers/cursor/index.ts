@@ -26,7 +26,9 @@ import {
   recordCursorConversation,
 } from "./session.ts";
 import {
-  canBridgeCursorShellTools,
+  canBridgeCursorBashTool,
+  canBridgeCursorNativeTools,
+  canBridgeCursorWriteTool,
   createCursorShellToolBridge,
   resumeCursorShellToolBridge,
 } from "./tool-bridge.ts";
@@ -89,7 +91,7 @@ async function handleMessages(
     recordCursorConversation(ctx.sessionId, cursorSessionId);
     log.debug("cursor session observed", { cursorSessionId });
   };
-  const shellBridge = wantStream && ctx.sessionId && canBridgeCursorShellTools(body, ctx)
+  const nativeToolBridge = wantStream && ctx.sessionId && canBridgeCursorNativeTools(body, ctx)
     ? createCursorShellToolBridge({
       sessionId: ctx.sessionId,
       messageId,
@@ -100,6 +102,8 @@ async function handleMessages(
       onSession,
     })
     : undefined;
+  const bridgeBash = canBridgeCursorBashTool(body);
+  const bridgeWrite = canBridgeCursorWriteTool(body);
 
   let upstream: ReadableStream<Uint8Array>;
   try {
@@ -110,7 +114,8 @@ async function handleMessages(
       model: selection.requestedModel,
       auth,
       ctx,
-      shellStreamHandler: shellBridge?.shellStreamHandler,
+      shellStreamHandler: bridgeBash ? nativeToolBridge?.shellStreamHandler : undefined,
+      writeHandler: bridgeWrite ? nativeToolBridge?.writeHandler : undefined,
     });
   } catch (err) {
     if (err instanceof CursorError) {
@@ -126,7 +131,7 @@ async function handleMessages(
   }
 
   if (wantStream) {
-    const stream = shellBridge?.stream(upstream, ctx.signal) ?? translateCursorStream(upstream, {
+    const stream = nativeToolBridge?.stream(upstream, ctx.signal) ?? translateCursorStream(upstream, {
       messageId,
       model: body.model,
       log: ctx.childLogger("cursor.stream"),

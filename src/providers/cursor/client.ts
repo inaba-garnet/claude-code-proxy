@@ -19,6 +19,7 @@ export interface CursorRunOptions {
   proto?: CursorProto;
   openRunStream?: CursorRunStreamFactory;
   shellStreamHandler?: CursorShellStreamHandler;
+  writeHandler?: CursorWriteHandler;
 }
 
 export type CursorRunStreamFactory = (opts: {
@@ -54,6 +55,22 @@ export type CursorAppendMessage = (messageJson: unknown) => Promise<void>;
 
 export type CursorShellStreamHandler = (
   exec: CursorShellStreamExec,
+  append: CursorAppendMessage,
+) => Promise<void>;
+
+export interface CursorWriteExec {
+  id?: number;
+  execId?: string;
+  message?: { case?: string; value?: unknown };
+}
+
+export interface CursorWriteResult {
+  success: boolean;
+  error?: string;
+}
+
+export type CursorWriteHandler = (
+  exec: CursorWriteExec,
   append: CursorAppendMessage,
 ) => Promise<void>;
 
@@ -174,7 +191,7 @@ export async function runCursorAgent(opts: CursorRunOptions): Promise<ReadableSt
       async transform(chunk, controller) {
         opts.ctx.traffic?.writeBytes("030-cursor-run-response-chunk", chunk);
         controller.enqueue(chunk);
-        await processServerControlFrames(chunk, proto, append, opts.ctx, opts.shellStreamHandler, (text) => {
+        await processServerControlFrames(chunk, proto, append, opts.ctx, opts.shellStreamHandler, opts.writeHandler, (text) => {
           if (!text || controller.desiredSize === null) return;
           try {
             opts.ctx.traffic?.writeJsonEvent("038-cursor-tool-trace", { text });
@@ -354,6 +371,7 @@ async function processServerControlFrames(
   append: (messageJson: unknown) => Promise<void>,
   ctx?: RequestContext,
   shellStreamHandler?: CursorShellStreamHandler,
+  writeHandler?: CursorWriteHandler,
   emitTrace?: (text: string) => void,
 ): Promise<void> {
   const state = controlFrameState.get(append) ?? {
@@ -389,8 +407,12 @@ async function processServerControlFrames(
         await append({ execClientMessage: await buildReadResult(oneof.value) });
         await append({ execClientControlMessage: { streamClose: { id: oneof.value.id } } });
       } else if (oneof.value?.message?.case === "writeArgs") {
-        await append({ execClientMessage: await buildWriteResult(oneof.value) });
-        await append({ execClientControlMessage: { streamClose: { id: oneof.value.id } } });
+        if (writeHandler) {
+          await writeHandler(oneof.value, append);
+        } else {
+          await append({ execClientMessage: await buildWriteResult(oneof.value) });
+          await append({ execClientControlMessage: { streamClose: { id: oneof.value.id } } });
+        }
       } else if (oneof.value?.message?.case === "grepArgs") {
         await append({ execClientMessage: await buildGrepResult(oneof.value) });
         await append({ execClientControlMessage: { streamClose: { id: oneof.value.id } } });
@@ -428,6 +450,19 @@ export function cursorShellStreamArgs(exec: CursorShellStreamExec): {
     : process.cwd();
   const timeoutMs = typeof args?.timeout === "number" && args.timeout > 0 ? args.timeout : 30_000;
   return { command, workingDirectory, timeoutMs };
+}
+
+export function cursorWriteArgs(exec: CursorWriteExec): {
+  path: string;
+  content: string;
+  returnFileContentAfterWrite: boolean;
+} {
+  const args = asRecord(exec.message?.value);
+  const path = typeof args?.path === "string" ? args.path : "";
+  const rawContent = writeContentFromArgs(args);
+  const content = typeof rawContent === "string" ? rawContent : rawContent.toString("utf8");
+  const returnFileContentAfterWrite = Boolean(args?.returnFileContentAfterWrite);
+  return { path, content, returnFileContentAfterWrite };
 }
 
 async function buildReadResult(exec: {
@@ -515,6 +550,47 @@ function writeContentFromArgs(args: Record<string, unknown> | undefined): string
 
 function lineCount(content: string): number {
   return content.length === 0 ? 0 : content.split("\n").length;
+}
+
+export async function appendCursorWriteResult(
+  exec: CursorWriteExec,
+  result: CursorWriteResult,
+  append: CursorAppendMessage,
+): Promise<void> {
+  await append({ execClientMessage: await buildWriteResultFromTool(exec, result) });
+  await append({ execClientControlMessage: { streamClose: { id: exec.id } } });
+}
+
+async function buildWriteResultFromTool(
+  exec: CursorWriteExec,
+  result: CursorWriteResult,
+): Promise<Record<string, unknown>> {
+  const { path, returnFileContentAfterWrite } = cursorWriteArgs(exec);
+  if (!result.success) {
+    return {
+      ...(typeof exec.id === "number" ? { id: exec.id } : {}),
+      ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+      writeResult: {
+        error: {
+          path,
+          error: result.error || "Write tool failed",
+        },
+      },
+    };
+  }
+
+  const content = await readFile(path, "utf8");
+  const success: Record<string, unknown> = {
+    path,
+    linesCreated: lineCount(content),
+    fileSize: Buffer.byteLength(content),
+  };
+  if (returnFileContentAfterWrite) success.fileContentAfterWrite = content;
+  return {
+    ...(typeof exec.id === "number" ? { id: exec.id } : {}),
+    ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+    writeResult: { success },
+  };
 }
 
 async function runShellStream(

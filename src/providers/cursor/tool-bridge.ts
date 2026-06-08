@@ -4,29 +4,45 @@ import type { Logger } from "../../log.ts";
 import type { RequestContext } from "../types.ts";
 import {
   appendCursorShellStreamResult,
+  appendCursorWriteResult,
   cursorShellStreamArgs,
+  cursorWriteArgs,
   decodeCursorStream,
   type CursorAppendMessage,
   type CursorShellStreamExec,
   type CursorStreamEvent,
   type CursorUsage,
+  type CursorWriteExec,
 } from "./client.ts";
 import type { CursorProto } from "./proto-loader.ts";
 import { cursorUsageToAnthropic } from "./translate/response.ts";
 
-interface PendingShellTool {
+interface PendingToolBase {
   toolUseId: string;
+  startedAt: number;
+  append: CursorAppendMessage;
+  resolve(result: NativeToolResult): void;
+  result: Promise<NativeToolResult>;
+}
+
+interface PendingShellTool extends PendingToolBase {
+  kind: "Bash";
   exec: CursorShellStreamExec;
   command: string;
   workingDirectory: string;
   timeoutMs: number;
-  startedAt: number;
-  append: CursorAppendMessage;
-  resolve(result: ShellToolResult): void;
-  result: Promise<ShellToolResult>;
 }
 
-interface ShellToolResult {
+interface PendingWriteTool extends PendingToolBase {
+  kind: "Write";
+  exec: CursorWriteExec;
+  path: string;
+  content: string;
+}
+
+type PendingNativeTool = PendingShellTool | PendingWriteTool;
+
+interface NativeToolResult {
   content: string;
   isError: boolean;
 }
@@ -37,8 +53,8 @@ interface CursorBridgeState {
   model: string;
   iterator: AsyncGenerator<CursorStreamEvent>;
   pendingNext?: Promise<IteratorResult<CursorStreamEvent>>;
-  pendingTool?: PendingShellTool;
-  waiters: Array<(tool: PendingShellTool) => void>;
+  pendingTool?: PendingNativeTool;
+  waiters: Array<(tool: PendingNativeTool) => void>;
   log: Logger;
   traffic?: RequestContext["traffic"];
   onSession?: (sessionId: string) => void;
@@ -46,8 +62,16 @@ interface CursorBridgeState {
 
 const bridgeStates = new Map<string, CursorBridgeState>();
 
-export function canBridgeCursorShellTools(body: AnthropicRequest, ctx: RequestContext): boolean {
-  return Boolean(ctx.sessionId && body.stream && body.tools?.some((tool) => tool.name === "Bash"));
+export function canBridgeCursorNativeTools(body: AnthropicRequest, ctx: RequestContext): boolean {
+  return Boolean(ctx.sessionId && body.stream && body.tools?.some((tool) => tool.name === "Bash" || tool.name === "Write"));
+}
+
+export function canBridgeCursorBashTool(body: AnthropicRequest): boolean {
+  return Boolean(body.tools?.some((tool) => tool.name === "Bash"));
+}
+
+export function canBridgeCursorWriteTool(body: AnthropicRequest): boolean {
+  return Boolean(body.tools?.some((tool) => tool.name === "Write"));
 }
 
 export function createCursorShellToolBridge(opts: {
@@ -60,6 +84,7 @@ export function createCursorShellToolBridge(opts: {
   onSession?: (sessionId: string) => void;
 }): {
   shellStreamHandler: (exec: CursorShellStreamExec, append: CursorAppendMessage) => Promise<void>;
+  writeHandler: (exec: CursorWriteExec, append: CursorAppendMessage) => Promise<void>;
   stream: (upstream: ReadableStream<Uint8Array>, signal?: AbortSignal) => ReadableStream<Uint8Array>;
 } {
   const state: CursorBridgeState = {
@@ -73,7 +98,7 @@ export function createCursorShellToolBridge(opts: {
     onSession: opts.onSession,
   };
 
-  const notifyTool = (tool: PendingShellTool) => {
+  const notifyTool = (tool: PendingNativeTool) => {
     state.pendingTool = tool;
     for (const waiter of state.waiters.splice(0)) waiter(tool);
   };
@@ -82,11 +107,12 @@ export function createCursorShellToolBridge(opts: {
     async shellStreamHandler(exec, append) {
       const { command, workingDirectory, timeoutMs } = cursorShellStreamArgs(exec);
       const toolUseId = `call_cursor_${crypto.randomUUID().replace(/-/g, "")}`;
-      let resolve!: (result: ShellToolResult) => void;
-      const result = new Promise<ShellToolResult>((r) => {
+      let resolve!: (result: NativeToolResult) => void;
+      const result = new Promise<NativeToolResult>((r) => {
         resolve = r;
       });
       const tool: PendingShellTool = {
+        kind: "Bash",
         toolUseId,
         exec,
         command,
@@ -98,6 +124,7 @@ export function createCursorShellToolBridge(opts: {
         result,
       };
       opts.traffic?.writeJsonEvent("038-cursor-tool-bridge-pause", {
+        kind: tool.kind,
         toolUseId,
         command,
         workingDirectory,
@@ -117,9 +144,51 @@ export function createCursorShellToolBridge(opts: {
         append,
       );
       opts.traffic?.writeJsonEvent("038-cursor-tool-bridge-resume", {
+        kind: tool.kind,
         toolUseId,
         isError: shellResult.isError,
         contentChars: shellResult.content.length,
+      });
+    },
+    async writeHandler(exec, append) {
+      const { path, content } = cursorWriteArgs(exec);
+      const toolUseId = `call_cursor_${crypto.randomUUID().replace(/-/g, "")}`;
+      let resolve!: (result: NativeToolResult) => void;
+      const result = new Promise<NativeToolResult>((r) => {
+        resolve = r;
+      });
+      const tool: PendingWriteTool = {
+        kind: "Write",
+        toolUseId,
+        exec,
+        path,
+        content,
+        startedAt: Date.now(),
+        append,
+        resolve,
+        result,
+      };
+      opts.traffic?.writeJsonEvent("038-cursor-tool-bridge-pause", {
+        kind: tool.kind,
+        toolUseId,
+        path,
+        contentChars: content.length,
+      });
+      notifyTool(tool);
+      const writeResult = await result;
+      await appendCursorWriteResult(
+        exec,
+        {
+          success: !writeResult.isError,
+          error: writeResult.isError ? writeResult.content : undefined,
+        },
+        append,
+      );
+      opts.traffic?.writeJsonEvent("038-cursor-tool-bridge-resume", {
+        kind: tool.kind,
+        toolUseId,
+        isError: writeResult.isError,
+        contentChars: writeResult.content.length,
       });
     },
     stream(upstream, signal) {
@@ -246,24 +315,18 @@ function streamBridgeUntilToolOrEnd(
         }
       };
 
-      const emitToolUseAndPause = (tool: PendingShellTool) => {
+      const emitToolUseAndPause = (tool: PendingNativeTool) => {
         closeOpenBlocks();
         ensureStart();
         const index = nextIndex++;
-        const input = JSON.stringify({
-          command: claudeBashCommand(tool),
-          timeout: tool.timeoutMs,
-          description: "Run Cursor-requested shell command",
-          run_in_background: false,
-          dangerouslyDisableSandbox: false,
-        });
+        const input = toolUseInput(tool);
         emit("content_block_start", {
           type: "content_block_start",
           index,
           content_block: {
             type: "tool_use",
             id: tool.toolUseId,
-            name: "Bash",
+            name: tool.kind,
             input: {},
           },
         });
@@ -359,7 +422,7 @@ function streamBridgeUntilToolOrEnd(
   });
 }
 
-function waitForPendingTool(state: CursorBridgeState): Promise<PendingShellTool> {
+function waitForPendingTool(state: CursorBridgeState): Promise<PendingNativeTool> {
   if (state.pendingTool) return Promise.resolve(state.pendingTool);
   return new Promise((resolve) => state.waiters.push(resolve));
 }
@@ -385,6 +448,22 @@ function renderToolResultContent(content: AnthropicToolResultBlock["content"]): 
       return JSON.stringify(block);
     })
     .join("\n");
+}
+
+function toolUseInput(tool: PendingNativeTool): string {
+  if (tool.kind === "Write") {
+    return JSON.stringify({
+      file_path: tool.path,
+      content: tool.content,
+    });
+  }
+  return JSON.stringify({
+    command: claudeBashCommand(tool),
+    timeout: tool.timeoutMs,
+    description: "Run Cursor-requested shell command",
+    run_in_background: false,
+    dangerouslyDisableSandbox: false,
+  });
 }
 
 function claudeBashCommand(tool: PendingShellTool): string {

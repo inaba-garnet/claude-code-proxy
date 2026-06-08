@@ -4,6 +4,9 @@ import type { RequestContext } from "../types.ts";
 import { encodeConnectFrame, runCursorAgent } from "./client.ts";
 import type { CursorProto, ProtoClass, ProtoMessage } from "./proto-loader.ts";
 import { parseSseStream } from "../../sse.ts";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const originalToken = process.env.CCP_CURSOR_AUTH_TOKEN;
 
@@ -257,6 +260,137 @@ describe("Cursor provider messages", () => {
     )).toBe(false);
     expect(resumeEvents.find((event) => event.event === "content_block_delta")?.data.delta.text).toBe(
       "resumed after native shell",
+    );
+    expect(resumeEvents.find((event) => event.event === "message_delta")?.data.delta.stop_reason).toBe("end_turn");
+    expect(resumeEvents.at(-1)?.event).toBe("message_stop");
+  });
+
+  it("bridges Cursor writeArgs through Claude Write tool_use and resumes from tool_result", async () => {
+    let serverController!: ReadableStreamDefaultController<Uint8Array>;
+    const sentFrames: Array<Record<string, any>> = [];
+    let finalResponseSent = false;
+    const dir = await mkdtemp(join(tmpdir(), "cursor-write-bridge-"));
+    const file = join(dir, "history", "findings.md");
+    const fileContent = "finding one\nfinding two\n";
+    const serverReadable = new ReadableStream<Uint8Array>({
+      start(controller) {
+        serverController = controller;
+        queueMicrotask(() => {
+          controller.enqueue(frame({
+            message: {
+              case: "execServerMessage",
+              value: {
+                id: 12,
+                execId: "exec-write",
+                message: {
+                  case: "writeArgs",
+                  value: {
+                    path: file,
+                    fileText: fileContent,
+                    returnFileContentAfterWrite: true,
+                  },
+                },
+              },
+            },
+          }));
+        });
+      },
+    });
+    const provider = createCursorProvider({
+      loadAuth: async () => ({ accessToken: "token", source: "test" }),
+      runAgent: async (opts) =>
+        runCursorAgent({
+          ...opts,
+          proto: fakeProto,
+          openRunStream: async () => ({
+            readable: serverReadable,
+            status: Promise.resolve({ status: 200 }),
+            async write(frameBytes) {
+              const message = decodeFrameJson(frameBytes) as Record<string, any>;
+              sentFrames.push(message);
+              if (message.execClientMessage?.writeResult?.success && !finalResponseSent) {
+                finalResponseSent = true;
+                serverController.enqueue(frame({
+                  interactionUpdate: { textDelta: { text: "resumed after native write" } },
+                }));
+                serverController.enqueue(frame({
+                  interactionUpdate: { turnEnded: { inputTokens: "5", outputTokens: "4" } },
+                }));
+                serverController.close();
+              }
+            },
+            close() {},
+          }),
+        }),
+      proto: fakeProto,
+    });
+
+    const initial = await provider.handleMessages(
+      {
+        model: "cursor",
+        stream: true,
+        tools: [{ name: "Write", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "write file" }],
+      },
+      fakeCtx(),
+    );
+    const initialEvents = await collectSse(initial);
+    const toolStart = initialEvents.find((event) => event.event === "content_block_start"
+      && event.data.content_block?.type === "tool_use");
+    const toolInputDelta = initialEvents.find((event) => event.event === "content_block_delta"
+      && event.data.delta?.type === "input_json_delta");
+
+    expect(toolStart?.data.content_block.name).toBe("Write");
+    expect(toolStart?.data.content_block.id).toStartWith("call_cursor_");
+    expect(JSON.parse(toolInputDelta?.data.delta.partial_json)).toEqual({
+      file_path: file,
+      content: fileContent,
+    });
+    expect(initialEvents.find((event) => event.event === "message_delta")?.data.delta.stop_reason).toBe("tool_use");
+    expect(sentFrames.some((message) => message.execClientMessage?.writeResult)).toBe(false);
+
+    await mkdir(join(dir, "history"), { recursive: true });
+    await writeFile(file, fileContent, "utf8");
+    const resume = await provider.handleMessages(
+      {
+        model: "cursor",
+        stream: true,
+        messages: [
+          {
+            role: "assistant",
+            content: [{
+              type: "tool_use",
+              id: toolStart!.data.content_block.id,
+              name: "Write",
+              input: { file_path: file, content: fileContent },
+            }],
+          },
+          {
+            role: "user",
+            content: [{
+              type: "tool_result",
+              tool_use_id: toolStart!.data.content_block.id,
+              content: `Wrote 3 lines to ${file}`,
+              is_error: false,
+            }],
+          },
+        ],
+      },
+      fakeCtx(),
+    );
+    const resumeEvents = await collectSse(resume);
+    const writeResult = sentFrames.find((message) => message.execClientMessage?.writeResult)
+      ?.execClientMessage.writeResult.success;
+
+    expect(writeResult).toEqual({
+      path: file,
+      linesCreated: 3,
+      fileSize: 24,
+      fileContentAfterWrite: fileContent,
+    });
+    expect(sentFrames.at(-1)).toEqual({ execClientControlMessage: { streamClose: { id: 12 } } });
+    expect(resumeEvents.find((event) => event.event === "content_block_delta")?.data.delta.text).toBe(
+      "resumed after native write",
     );
     expect(resumeEvents.find((event) => event.event === "message_delta")?.data.delta.stop_reason).toBe("end_turn");
     expect(resumeEvents.at(-1)?.event).toBe("message_stop");
