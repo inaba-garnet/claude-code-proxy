@@ -2,20 +2,13 @@ import { encode } from "gpt-tokenizer/model/gpt-4o";
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import type { ResponsesRequest } from "./translate/request.ts";
 import {
-  countAnthropicRequestTokensWithSystem,
+  countAnthropicTokens,
   IMAGE_TOKEN_ESTIMATE,
 } from "../shared/count-tokens.ts";
 import { countToolSchemaTokens } from "../shared/tool-schema.ts";
 
 export function countTokens(req: AnthropicRequest): number {
-  return countAnthropicRequestTokensWithSystem({
-    req,
-    countToken: (value) => encode(value).length,
-    tools: req.tools,
-    readToolName: (tool) => tool.name,
-    readToolDescription: (tool) => tool.description,
-    readToolSchema: (tool) => tool.input_schema,
-  });
+  return countAnthropicTokens(req, (value) => encode(value).length);
 }
 
 export function countTranslatedTokens(

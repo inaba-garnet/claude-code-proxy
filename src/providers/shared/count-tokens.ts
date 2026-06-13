@@ -23,6 +23,31 @@ export function countContentParts(
 
 export type AnthropicRequestTokenCounter = (text: string) => number;
 
+export function countAnthropicTokens(
+  req: AnthropicRequest,
+  countToken: AnthropicRequestTokenCounter,
+  includeThinking = false,
+): number {
+  const base = {
+    req,
+    countToken,
+    tools: req.tools,
+    readToolName: (tool: { name: string; description?: string; input_schema: unknown }) =>
+      tool.name,
+    readToolDescription: (tool: {
+      name: string;
+      description?: string;
+      input_schema: unknown;
+    }) => tool.description,
+    readToolSchema: (tool: { name: string; description?: string; input_schema: unknown }) =>
+      tool.input_schema,
+  };
+  if (includeThinking) {
+    return countAnthropicRequestTokensWithSystem({ ...base, includeThinking: true });
+  }
+  return countAnthropicRequestTokensWithSystem({ ...base, includeThinking: false });
+}
+
 type AnthropicToolReaders<TTool> = {
   readToolName: (tool: TTool) => string;
   readToolDescription: (tool: TTool) => string | undefined;

@@ -2,7 +2,7 @@ import { encode } from "gpt-tokenizer/model/gpt-4o";
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import type { KimiChatRequest } from "./translate/request.ts";
 import {
-  countAnthropicRequestTokensWithSystem,
+  countAnthropicTokens,
   IMAGE_TOKEN_ESTIMATE,
   countContentParts,
 } from "../shared/count-tokens.ts";
@@ -11,15 +11,7 @@ import { countToolSchemaTokens } from "../shared/tool-schema.ts";
 // Approximate: Kimi's tokenizer isn't gpt-tokenizer, but Claude Code's
 // compaction logic only needs a monotonic estimate, not an exact count.
 export function countTokens(req: AnthropicRequest): number {
-  return countAnthropicRequestTokensWithSystem({
-    req,
-    countToken: (value) => encode(value).length,
-    tools: req.tools,
-    readToolName: (tool) => tool.name,
-    readToolDescription: (tool) => tool.description,
-    readToolSchema: (tool) => tool.input_schema,
-    includeThinking: true,
-  });
+  return countAnthropicTokens(req, (value) => encode(value).length, true);
 }
 
 export function countTranslatedTokens(req: KimiChatRequest): number {
