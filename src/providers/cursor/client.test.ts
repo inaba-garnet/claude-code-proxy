@@ -7,10 +7,10 @@ import {
   decodeFrameJson,
   fakeProtoMerged as fakeProto,
   frame,
+  fakeCursorCtx,
   jsonBytes,
   streamFromChunks,
 } from "./cursor-test-helpers.ts";
-import type { RequestContext } from "../types.ts";
 
 describe("Cursor protocol client", () => {
   it("acks exec setup and KV messages on the HTTP/2 Run stream", async () => {
@@ -22,7 +22,7 @@ describe("Cursor protocol client", () => {
       conversationId: "conversation",
       model: { modelId: "composer-2.5" },
       auth: { accessToken: "token", source: "test" },
-      ctx: fakeCtx(),
+      ctx: fakeCursorCtx(),
       proto: fakeProto,
       openRunStream: async () => ({
         readable: streamFromChunks([
@@ -84,7 +84,7 @@ describe("Cursor protocol client", () => {
         },
       ],
       auth: { accessToken: "token", source: "test" },
-      ctx: fakeCtx(),
+      ctx: fakeCursorCtx(),
       proto: fakeProto,
       openRunStream: async () => ({
         readable: streamFromChunks([encodeConnectFrame(jsonBytes({}), 2)]),
@@ -120,7 +120,7 @@ describe("Cursor protocol client", () => {
       conversationId: "conversation",
       model: { modelId: "composer-2.5" },
       auth: { accessToken: "token", source: "test" },
-      ctx: fakeCtx(),
+      ctx: fakeCursorCtx(),
       proto: fakeProto,
       openRunStream: async () => ({
         readable: streamFromChunks([
@@ -175,7 +175,7 @@ describe("Cursor protocol client", () => {
       conversationId: "conversation",
       model: { modelId: "composer-2.5" },
       auth: { accessToken: "token", source: "test" },
-      ctx: fakeCtx(),
+      ctx: fakeCursorCtx(),
       proto: fakeProto,
       openRunStream: async () => ({
         readable: streamFromChunks([
@@ -230,7 +230,7 @@ describe("Cursor protocol client", () => {
       conversationId: "conversation",
       model: { modelId: "composer-2.5" },
       auth: { accessToken: "token", source: "test" },
-      ctx: fakeCtx(),
+      ctx: fakeCursorCtx(),
       proto: fakeProto,
       openRunStream: async () => ({
         readable: streamFromChunks([
@@ -294,7 +294,7 @@ describe("Cursor protocol client", () => {
       conversationId: "conversation",
       model: { modelId: "composer-2.5" },
       auth: { accessToken: "token", source: "test" },
-      ctx: fakeCtx(),
+      ctx: fakeCursorCtx(),
       proto: fakeProto,
       openRunStream: async () => ({
         readable: streamFromChunks([
@@ -362,7 +362,7 @@ describe("Cursor protocol client", () => {
       conversationId: "conversation",
       model: { modelId: "composer-2.5" },
       auth: { accessToken: "token", source: "test" },
-      ctx: fakeCtx(),
+      ctx: fakeCursorCtx(),
       proto: fakeProto,
       openRunStream: async () => ({
         readable: streamFromChunks([
@@ -417,7 +417,7 @@ describe("Cursor protocol client", () => {
       conversationId: "conversation",
       model: { modelId: "composer-2.5" },
       auth: { accessToken: "token", source: "test" },
-      ctx: fakeCtx(),
+      ctx: fakeCursorCtx(),
       proto: fakeProto,
       openRunStream: async () => ({
         readable: new ReadableStream<Uint8Array>(),
@@ -457,7 +457,7 @@ describe("Cursor protocol client", () => {
         conversationId: "conversation",
         model: { modelId: "composer-2.5" },
         auth: { accessToken: "token", source: "test" },
-        ctx: fakeCtx(),
+        ctx: fakeCursorCtx(),
         proto: fakeProto,
         openRunStream: async () => ({
           readable: new ReadableStream<Uint8Array>(),
@@ -491,20 +491,4 @@ async function drain(stream: ReadableStream<Uint8Array>): Promise<void> {
   } finally {
     reader.releaseLock();
   }
-}
-
-function fakeCtx(): RequestContext {
-  return {
-    reqId: "req",
-    signal: new AbortController().signal,
-    childLogger: () => ({
-      debug() {},
-      info() {},
-      warn() {},
-      error() {},
-      child() {
-        return this;
-      },
-    }),
-  };
 }

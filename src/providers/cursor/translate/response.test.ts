@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { gzipSync } from "node:zlib";
-import { parseSseStream } from "../../../sse.ts";
 import { decodeCursorStream, encodeConnectFrame } from "../client.ts";
 import {
+  collectCursorSse,
   fakeProto,
   frame,
   jsonBytes,
@@ -204,10 +204,7 @@ describe("Cursor response translation", () => {
       },
     );
 
-    const events = [];
-    for await (const event of parseSseStream(downstream)) {
-      events.push({ event: event.event, data: JSON.parse(event.data) });
-    }
+    const events = await collectCursorSse(downstream);
 
     expect(events.map((event) => event.event)).toEqual([
       "message_start",
@@ -259,10 +256,7 @@ describe("Cursor response translation", () => {
       },
     );
 
-    const events = [];
-    for await (const event of parseSseStream(downstream)) {
-      events.push({ event: event.event, data: JSON.parse(event.data) });
-    }
+    const events = await collectCursorSse(downstream);
 
     expect(events.map((event) => event.event)).toEqual(["message_start", "ping", "error"]);
     expect(events[2]?.data.error.message).toContain("resource_exhausted");

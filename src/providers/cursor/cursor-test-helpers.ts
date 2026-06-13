@@ -1,5 +1,7 @@
 import { encodeConnectFrame } from "./client.ts";
 import type { CursorProto, ProtoClass, ProtoMessage } from "./proto-loader.ts";
+import type { RequestContext } from "../types.ts";
+import { parseSseStream } from "../../sse.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -72,4 +74,38 @@ export function streamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Arra
       controller.close();
     },
   });
+}
+
+export type FakeCursorCtxOptions = {
+  sessionId?: string;
+  reqId?: string;
+};
+
+export function fakeCursorCtx(options: FakeCursorCtxOptions = {}): RequestContext {
+  const { sessionId, reqId = "req" } = options;
+  return {
+    reqId,
+    ...(sessionId === undefined ? {} : { sessionId }),
+    signal: new AbortController().signal,
+    childLogger: () => ({
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+      child() {
+        return this;
+      },
+    }),
+  };
+}
+
+export async function collectCursorSse(
+  response: Response | ReadableStream<Uint8Array>,
+): Promise<Array<{ event: string; data: any }>> {
+  const events = [];
+  const body = response instanceof ReadableStream ? response : response.body!;
+  for await (const event of parseSseStream(body)) {
+    events.push({ event: event.event ?? "message", data: JSON.parse(event.data) });
+  }
+  return events;
 }

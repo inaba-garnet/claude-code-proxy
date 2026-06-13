@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { cursorProvider, createCursorProvider } from "./index.ts";
-import type { RequestContext } from "../types.ts";
 import { encodeConnectFrame, runCursorAgent } from "./client.ts";
 import {
   decodeFrameJson,
+  collectCursorSse,
+  fakeCursorCtx,
   fakeProtoMerged as fakeProto,
   frame,
   jsonBytes,
   streamFromChunks,
 } from "./cursor-test-helpers.ts";
-import { parseSseStream } from "../../sse.ts";
 import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,7 +30,7 @@ describe("Cursor provider auth errors", () => {
         model: "cursor",
         messages: [{ role: "user", content: "hello" }],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
     const body = (await response.json()) as {
       error: { type: string; message: string };
@@ -61,7 +61,7 @@ describe("Cursor provider messages", () => {
         model: "cursor",
         messages: [{ role: "user", content: "hello" }],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
     const body = (await response.json()) as { content: Array<{ type: string; text?: string }> };
 
@@ -88,12 +88,9 @@ describe("Cursor provider messages", () => {
         stream: true,
         messages: [{ role: "user", content: "hello" }],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
-    const events = [];
-    for await (const event of parseSseStream(response.body!)) {
-      events.push({ event: event.event, data: JSON.parse(event.data) });
-    }
+    const events = await collectCursorSse(response);
 
     expect(response.headers.get("content-type")).toBe("text/event-stream");
     expect(response.headers.get("cache-control")).toBe("no-cache");
@@ -139,7 +136,7 @@ describe("Cursor provider messages", () => {
         model: "cursor",
         messages: [{ role: "user", content: "hello" }],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
     const body = (await response.json()) as { error: { message: string } };
 
@@ -213,9 +210,9 @@ describe("Cursor provider messages", () => {
         tools: [{ name: "Bash", input_schema: { type: "object" } }],
         messages: [{ role: "user", content: "run shell" }],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
-    const initialEvents = await collectSse(initial);
+    const initialEvents = await collectCursorSse(initial);
     const toolStart = initialEvents.find((event) => event.event === "content_block_start"
       && event.data.content_block?.type === "tool_use");
 
@@ -254,9 +251,9 @@ describe("Cursor provider messages", () => {
           },
         ],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
-    const resumeEvents = await collectSse(resume);
+    const resumeEvents = await collectCursorSse(resume);
 
     expect(sentFrames.some((message) =>
       message.execClientMessage?.shellStream?.stdout?.data === "native shell output"
@@ -337,9 +334,9 @@ describe("Cursor provider messages", () => {
         tools: [{ name: "Read", input_schema: { type: "object" } }],
         messages: [{ role: "user", content: "try hidden shell edit" }],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
-    const events = await collectSse(response);
+    const events = await collectCursorSse(response);
 
     expect(events.some((event) =>
       event.event === "content_block_start" && event.data.content_block?.name === "Bash"
@@ -421,9 +418,9 @@ describe("Cursor provider messages", () => {
         tools: [{ name: "Write", input_schema: { type: "object" } }],
         messages: [{ role: "user", content: "write file" }],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
-    const initialEvents = await collectSse(initial);
+    const initialEvents = await collectCursorSse(initial);
     const toolStart = initialEvents.find((event) => event.event === "content_block_start"
       && event.data.content_block?.type === "tool_use");
     const toolInputDelta = initialEvents.find((event) => event.event === "content_block_delta"
@@ -465,9 +462,9 @@ describe("Cursor provider messages", () => {
           },
         ],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
-    const resumeEvents = await collectSse(resume);
+    const resumeEvents = await collectCursorSse(resume);
     const writeResult = sentFrames.find((message) => message.execClientMessage?.writeResult)
       ?.execClientMessage.writeResult.success;
 
@@ -571,9 +568,9 @@ describe("Cursor provider messages", () => {
         ],
         messages: [{ role: "user", content: "edit readme" }],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
-    const initialEvents = await collectSse(initial);
+    const initialEvents = await collectCursorSse(initial);
     const readToolStart = initialEvents.find((event) => event.event === "content_block_start"
       && event.data.content_block?.type === "tool_use");
     const readToolInput = initialEvents.find((event) => event.event === "content_block_delta"
@@ -608,9 +605,9 @@ describe("Cursor provider messages", () => {
           },
         ],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
-    const afterReadEvents = await collectSse(afterRead);
+    const afterReadEvents = await collectCursorSse(afterRead);
     const readResult = sentFrames.find((message) => message.execClientMessage?.readResult)
       ?.execClientMessage.readResult.success;
     const writeToolStart = afterReadEvents.find((event) => event.event === "content_block_start"
@@ -656,9 +653,9 @@ describe("Cursor provider messages", () => {
           },
         ],
       },
-      fakeCtx(),
+      fakeCursorCtx({ sessionId: "session" }),
     );
-    const afterWriteEvents = await collectSse(afterWrite);
+    const afterWriteEvents = await collectCursorSse(afterWrite);
     const writeResult = sentFrames.find((message) => message.execClientMessage?.writeResult)
       ?.execClientMessage.writeResult.success;
 
@@ -676,31 +673,6 @@ describe("Cursor provider messages", () => {
     );
   });
 });
-
-function fakeCtx(): RequestContext {
-  return {
-    reqId: "req",
-    sessionId: "session",
-    signal: new AbortController().signal,
-    childLogger: () => ({
-      debug() {},
-      info() {},
-      warn() {},
-      error() {},
-      child() {
-        return this;
-      },
-    }),
-  };
-}
-
-async function collectSse(response: Response): Promise<Array<{ event: string; data: any }>> {
-  const events = [];
-  for await (const event of parseSseStream(response.body!)) {
-    events.push({ event: event.event ?? "message", data: JSON.parse(event.data) });
-  }
-  return events;
-}
 
 async function exists(path: string): Promise<boolean> {
   try {
