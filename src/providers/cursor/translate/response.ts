@@ -3,6 +3,7 @@ import type { Logger } from "../../../log.ts";
 import type { TrafficCapture } from "../../types.ts";
 import { decodeCursorStream, type CursorStreamEvent, type CursorUsage } from "../client.ts";
 import type { CursorProto } from "../proto-loader.ts";
+import { createCursorSseFramer } from "../sse-framing.ts";
 
 export interface AnthropicCursorResponse {
   id: string;
@@ -113,12 +114,6 @@ export function translateCursorStream(
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       let closed = false;
-      let started = false;
-      let thinkingOpen = false;
-      let textOpen = false;
-      let nextIndex = 0;
-      let thinkingIndex = -1;
-      let textIndex = -1;
 
       const emit = (event: string, data: unknown) => {
         if (closed || opts.signal?.aborted || controller.desiredSize === null) return false;
@@ -127,64 +122,12 @@ export function translateCursorStream(
         return true;
       };
 
-      const ensureStart = () => {
-        if (started) return;
-        started = true;
-        emit("message_start", {
-          type: "message_start",
-          message: {
-            id: opts.messageId,
-            type: "message",
-            role: "assistant",
-            model: opts.model,
-            content: [],
-            stop_reason: null,
-            stop_sequence: null,
-            usage: {
-              input_tokens: 0,
-              output_tokens: 0,
-              cache_creation_input_tokens: 0,
-              cache_read_input_tokens: 0,
-            },
-          },
-        });
-        emit("ping", { type: "ping" });
-      };
-
-      const openThinking = () => {
-        if (thinkingOpen) return;
-        ensureStart();
-        thinkingOpen = true;
-        thinkingIndex = nextIndex++;
-        emit("content_block_start", {
-          type: "content_block_start",
-          index: thinkingIndex,
-          content_block: { type: "thinking", thinking: "", signature: "" },
-        });
-      };
-
-      const openText = () => {
-        if (textOpen) return;
-        ensureStart();
-        textOpen = true;
-        textIndex = nextIndex++;
-        emit("content_block_start", {
-          type: "content_block_start",
-          index: textIndex,
-          content_block: { type: "text", text: "" },
-        });
-      };
-
-      const closeOpenBlocks = () => {
-        if (thinkingOpen) {
-          emit("content_block_stop", { type: "content_block_stop", index: thinkingIndex });
-          thinkingOpen = false;
-        }
-        if (textOpen) {
-          emit("content_block_stop", { type: "content_block_stop", index: textIndex });
-          textOpen = false;
-        }
-      };
+      const framing = createCursorSseFramer({
+        messageId: opts.messageId,
+        model: opts.model,
+        emit,
+        mapUsage: cursorUsageToAnthropic,
+      });
 
       try {
         let finalUsage: CursorUsage | undefined;
@@ -196,24 +139,10 @@ export function translateCursorStream(
               opts.onSession?.(event.sessionId);
               break;
             case "thinking_delta":
-              openThinking();
-              emit("content_block_delta", {
-                type: "content_block_delta",
-                index: thinkingIndex,
-                delta: { type: "thinking_delta", thinking: event.text },
-              });
+              framing.emitThinkingDelta(event.text);
               break;
             case "text_delta":
-              if (thinkingOpen) {
-                emit("content_block_stop", { type: "content_block_stop", index: thinkingIndex });
-                thinkingOpen = false;
-              }
-              openText();
-              emit("content_block_delta", {
-                type: "content_block_delta",
-                index: textIndex,
-                delta: { type: "text_delta", text: event.text },
-              });
+              framing.emitTextDelta(event.text);
               break;
             case "usage":
               finalUsage = event.usage;
@@ -222,22 +151,10 @@ export function translateCursorStream(
               break;
           }
         }
-        ensureStart();
-        closeOpenBlocks();
-        emit("message_delta", {
-          type: "message_delta",
-          delta: { stop_reason: "end_turn", stop_sequence: null },
-          usage: cursorUsageToAnthropic(finalUsage),
-        });
-        emit("message_stop", { type: "message_stop" });
+        framing.emitFinalMessage("end_turn", finalUsage);
       } catch (err) {
         opts.log.warn("cursor stream error", { err: String(err) });
-        ensureStart();
-        closeOpenBlocks();
-        emit("error", {
-          type: "error",
-          error: { type: "api_error", message: String(err) },
-        });
+        framing.emitError(err);
       } finally {
         closed = true;
         try {

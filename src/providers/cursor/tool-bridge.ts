@@ -19,6 +19,7 @@ import {
 } from "./client.ts";
 import type { CursorProto } from "./proto-loader.ts";
 import { cursorUsageToAnthropic } from "./translate/response.ts";
+import { createCursorSseFramer } from "./sse-framing.ts";
 
 interface PendingToolBase {
   toolUseId: string;
@@ -333,12 +334,6 @@ function streamBridgeUntilToolOrEnd(
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       let closed = false;
-      let started = false;
-      let thinkingOpen = false;
-      let textOpen = false;
-      let nextIndex = 0;
-      let thinkingIndex = -1;
-      let textIndex = -1;
       let finalUsage: CursorUsage | undefined;
 
       const emit = (event: string, data: unknown) => {
@@ -348,92 +343,41 @@ function streamBridgeUntilToolOrEnd(
         return true;
       };
 
-      const ensureStart = () => {
-        if (started) return;
-        started = true;
-        emit("message_start", {
-          type: "message_start",
-          message: {
-            id: state.messageId,
-            type: "message",
-            role: "assistant",
-            model: state.model,
-            content: [],
-            stop_reason: null,
-            stop_sequence: null,
-            usage: {
-              input_tokens: 0,
-              output_tokens: 0,
-              cache_creation_input_tokens: 0,
-              cache_read_input_tokens: 0,
-            },
-          },
-        });
-        emit("ping", { type: "ping" });
-      };
-
-      const openThinking = () => {
-        if (thinkingOpen) return;
-        ensureStart();
-        thinkingOpen = true;
-        thinkingIndex = nextIndex++;
-        emit("content_block_start", {
-          type: "content_block_start",
-          index: thinkingIndex,
-          content_block: { type: "thinking", thinking: "", signature: "" },
-        });
-      };
-
-      const openText = () => {
-        if (textOpen) return;
-        ensureStart();
-        textOpen = true;
-        textIndex = nextIndex++;
-        emit("content_block_start", {
-          type: "content_block_start",
-          index: textIndex,
-          content_block: { type: "text", text: "" },
-        });
-      };
-
-      const closeOpenBlocks = () => {
-        if (thinkingOpen) {
-          emit("content_block_stop", { type: "content_block_stop", index: thinkingIndex });
-          thinkingOpen = false;
-        }
-        if (textOpen) {
-          emit("content_block_stop", { type: "content_block_stop", index: textIndex });
-          textOpen = false;
-        }
-      };
+      const framing = createCursorSseFramer({
+        messageId: state.messageId,
+        model: state.model,
+        emit,
+        mapUsage: cursorUsageToAnthropic,
+      });
 
       const emitToolUseAndPause = (tool: PendingNativeTool) => {
-        closeOpenBlocks();
-        ensureStart();
-        const index = nextIndex++;
-        const input = toolUseInput(tool);
-        emit("content_block_start", {
-          type: "content_block_start",
-          index,
-          content_block: {
-            type: "tool_use",
-            id: tool.toolUseId,
-            name: tool.kind,
-            input: {},
-          },
+        framing.emitToolPauseMessage(finalUsage, (index) => {
+          const input = toolUseInput(tool);
+          emit("content_block_start", {
+            type: "content_block_start",
+            index,
+            content_block: {
+              type: "tool_use",
+              id: tool.toolUseId,
+              name: tool.kind,
+              input: {},
+            },
+          });
+          emit("content_block_delta", {
+            type: "content_block_delta",
+            index,
+            delta: { type: "input_json_delta", partial_json: input },
+          });
+          emit("content_block_stop", { type: "content_block_stop", index });
         });
-        emit("content_block_delta", {
-          type: "content_block_delta",
-          index,
-          delta: { type: "input_json_delta", partial_json: input },
-        });
-        emit("content_block_stop", { type: "content_block_stop", index });
-        emit("message_delta", {
-          type: "message_delta",
-          delta: { stop_reason: "tool_use", stop_sequence: null },
-          usage: cursorUsageToAnthropic(finalUsage),
-        });
-        emit("message_stop", { type: "message_stop" });
+      };
+
+      const emitMessageEnd = () => {
+        framing.emitFinalMessage("end_turn", finalUsage);
+      };
+
+      const emitStreamError = (err: unknown) => {
+        framing.emitError(err);
       };
 
       try {
@@ -459,24 +403,10 @@ function streamBridgeUntilToolOrEnd(
               state.onSession?.(event.sessionId);
               break;
             case "thinking_delta":
-              openThinking();
-              emit("content_block_delta", {
-                type: "content_block_delta",
-                index: thinkingIndex,
-                delta: { type: "thinking_delta", thinking: event.text },
-              });
+              framing.emitThinkingDelta(event.text);
               break;
             case "text_delta":
-              if (thinkingOpen) {
-                emit("content_block_stop", { type: "content_block_stop", index: thinkingIndex });
-                thinkingOpen = false;
-              }
-              openText();
-              emit("content_block_delta", {
-                type: "content_block_delta",
-                index: textIndex,
-                delta: { type: "text_delta", text: event.text },
-              });
+              framing.emitTextDelta(event.text);
               break;
             case "usage":
               finalUsage = event.usage;
@@ -486,23 +416,11 @@ function streamBridgeUntilToolOrEnd(
           }
         }
 
-        ensureStart();
-        closeOpenBlocks();
-        emit("message_delta", {
-          type: "message_delta",
-          delta: { stop_reason: "end_turn", stop_sequence: null },
-          usage: cursorUsageToAnthropic(finalUsage),
-        });
-        emit("message_stop", { type: "message_stop" });
+        emitMessageEnd();
         bridgeStates.delete(state.sessionId);
       } catch (err) {
         state.log.warn("cursor bridge stream error", { err: String(err) });
-        ensureStart();
-        closeOpenBlocks();
-        emit("error", {
-          type: "error",
-          error: { type: "api_error", message: String(err) },
-        });
+        emitStreamError(err);
         bridgeStates.delete(state.sessionId);
       } finally {
         closed = true;
