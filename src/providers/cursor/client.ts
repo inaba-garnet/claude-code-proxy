@@ -563,9 +563,7 @@ async function buildReadResult(exec: {
     fileSize = String(Buffer.byteLength(content, "utf8"));
     totalLines = 1;
   }
-  return {
-    ...(typeof exec.id === "number" ? { id: exec.id } : {}),
-    ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+  return withExecIds(exec, {
     readResult: {
       success: {
         path: requestedPath,
@@ -574,7 +572,7 @@ async function buildReadResult(exec: {
         fileSize,
       },
     },
-  };
+  });
 }
 
 async function buildWriteResult(exec: {
@@ -597,22 +595,18 @@ async function buildWriteResult(exec: {
       fileSize: Buffer.byteLength(content),
     };
     if (returnContent) success.fileContentAfterWrite = await readFile(requestedPath, "utf8");
-    return {
-      ...(typeof exec.id === "number" ? { id: exec.id } : {}),
-      ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+    return withExecIds(exec, {
       writeResult: { success },
-    };
+    });
   } catch (err) {
-    return {
-      ...(typeof exec.id === "number" ? { id: exec.id } : {}),
-      ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+    return withExecIds(exec, {
       writeResult: {
         error: {
           path: requestedPath,
           error: err instanceof Error ? err.message : String(err),
         },
       },
-    };
+    });
   }
 }
 
@@ -624,6 +618,22 @@ function writeContentFromArgs(args: Record<string, unknown> | undefined): string
   if (args?.fileBytes instanceof Uint8Array) return Buffer.from(args.fileBytes);
   if (args?.file_bytes instanceof Uint8Array) return Buffer.from(args.file_bytes);
   return "";
+}
+
+interface CursorNativeExec {
+  id?: number;
+  execId?: string;
+}
+
+function withExecIds(
+  exec: CursorNativeExec,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...(typeof exec.id === "number" ? { id: exec.id } : {}),
+    ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+    ...payload,
+  };
 }
 
 function lineCount(content: string): number {
@@ -685,9 +695,7 @@ async function buildReadResultFromTool(
 
   const { path } = cursorReadArgs(exec);
   const content = result.error || `Error reading ${path}`;
-  return {
-    ...(typeof exec.id === "number" ? { id: exec.id } : {}),
-    ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+  return withExecIds(exec, {
     readResult: {
       success: {
         path,
@@ -696,7 +704,7 @@ async function buildReadResultFromTool(
         fileSize: String(Buffer.byteLength(content, "utf8")),
       },
     },
-  };
+  });
 }
 
 export async function appendCursorWriteResult(
@@ -714,16 +722,14 @@ async function buildWriteResultFromTool(
 ): Promise<Record<string, unknown>> {
   const { path, returnFileContentAfterWrite } = cursorWriteArgs(exec);
   if (!result.success) {
-    return {
-      ...(typeof exec.id === "number" ? { id: exec.id } : {}),
-      ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+    return withExecIds(exec, {
       writeResult: {
         error: {
           path,
           error: result.error || "Write tool failed",
         },
       },
-    };
+    });
   }
 
   const content = await readFile(path, "utf8");
@@ -733,11 +739,9 @@ async function buildWriteResultFromTool(
     fileSize: Buffer.byteLength(content),
   };
   if (returnFileContentAfterWrite) success.fileContentAfterWrite = content;
-  return {
-    ...(typeof exec.id === "number" ? { id: exec.id } : {}),
-    ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+  return withExecIds(exec, {
     writeResult: { success },
-  };
+  });
 }
 
 async function runShellStream(
@@ -874,11 +878,9 @@ function buildShellStream(
   exec: { id?: number; execId?: string },
   shellStream: Record<string, unknown>,
 ): Record<string, unknown> {
-  return {
-    ...(typeof exec.id === "number" ? { id: exec.id } : {}),
-    ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+  return withExecIds(exec, {
     shellStream,
-  };
+  });
 }
 
 async function buildGrepResult(exec: {
@@ -901,19 +903,15 @@ async function buildGrepResult(exec: {
       files = await grepFilesWithRg(pattern, path);
     }
   } catch (err) {
-    return {
-      ...(typeof exec.id === "number" ? { id: exec.id } : {}),
-      ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+    return withExecIds(exec, {
       grepResult: {
         error: {
           error: err instanceof Error ? err.message : String(err),
         },
       },
-    };
+    });
   }
-  return {
-    ...(typeof exec.id === "number" ? { id: exec.id } : {}),
-    ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+  return withExecIds(exec, {
     grepResult: {
       success: {
         pattern: resultPattern,
@@ -929,7 +927,7 @@ async function buildGrepResult(exec: {
         },
       },
     },
-  };
+  });
 }
 
 async function grepFilesWithRg(pattern: string, path: string): Promise<string[]> {
@@ -954,9 +952,7 @@ function buildRequestContextResult(exec: {
   execId?: string;
   message?: { case?: string; value?: unknown };
 }): Record<string, unknown> {
-  return {
-    ...(typeof exec.id === "number" ? { id: exec.id } : {}),
-    ...(typeof exec.execId === "string" ? { execId: exec.execId } : {}),
+  return withExecIds(exec, {
     requestContextResult: {
       success: {
         requestContext: {
@@ -981,7 +977,7 @@ function buildRequestContextResult(exec: {
         },
       },
     },
-  };
+  });
 }
 
 function buildInteractionResponse(query: {
