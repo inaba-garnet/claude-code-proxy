@@ -210,6 +210,31 @@ describe("translateStream", () => {
     expect(output).not.toContain("event: error");
   });
 
+  it("retries upstream socket read failures before downstream output starts", async () => {
+    let retryCalls = 0;
+    const err = new TypeError(
+      "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+    );
+
+    const output = await collect(
+      translateStream(upstreamThatErrorsAfterChunks([], err), {
+        messageId: "msg_1",
+        model: "gpt-5.5",
+        log: silentLog,
+        retryUpstream: async () => {
+          retryCalls++;
+          return { body: upstreamFromChunks(textChunks("Recovered")) };
+        },
+        computeRetryDelay: () => ({ waitMs: 0, exceedsBudget: false }),
+      }),
+    );
+
+    expect(retryCalls).toBe(1);
+    expect(output).toContain("Recovered");
+    expect(output).toContain("event: message_stop");
+    expect(output).not.toContain("event: error");
+  });
+
   it("does not retry overloaded stream errors after downstream output starts", async () => {
     let retryCalls = 0;
 

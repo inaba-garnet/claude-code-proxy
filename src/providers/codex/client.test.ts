@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { CodexHeaderTimeoutError, setCodexHeaderTimeoutForTests } from "./client.ts";
+import {
+  CodexHeaderTimeoutError,
+  CodexTransportError,
+  isRetryableCodexTransportError,
+  setCodexHeaderTimeoutForTests,
+} from "./client.ts";
 
 const originalFetch = globalThis.fetch;
 
@@ -14,5 +19,22 @@ describe("CodexHeaderTimeoutError", () => {
 
     expect(err.name).toBe("CodexHeaderTimeoutError");
     expect(err.message).toContain("123ms");
+  });
+});
+
+describe("CodexTransportError", () => {
+  it("classifies Bun socket-close fetch failures as retryable transport errors", () => {
+    const err = new TypeError(
+      "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+    );
+
+    expect(isRetryableCodexTransportError(err)).toBe(true);
+    expect(new CodexTransportError(err).message).toContain(
+      "socket connection was closed unexpectedly",
+    );
+  });
+
+  it("does not retry abort errors as transport failures", () => {
+    expect(isRetryableCodexTransportError(new DOMException("Aborted", "AbortError"))).toBe(false);
   });
 });
