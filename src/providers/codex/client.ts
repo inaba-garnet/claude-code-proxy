@@ -12,7 +12,7 @@ import { forceRefresh, getAuth } from "./auth/manager.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestContext } from "../types.ts";
 import { toWebSocketRequest, type ResponsesRequest } from "./translate/request.ts";
-import { retryOn429, sleep } from "../retry.ts";
+import { computeBackoffDelay, retryOn429, sleep } from "../retry.ts";
 import { headersToRecord } from "../../traffic.ts";
 import { summarizeCodexRequestSize } from "./request-summary.ts";
 import {
@@ -25,6 +25,7 @@ import {
 import { clearContinuation, type ContinuationCandidate } from "./continuation.ts";
 
 const FETCH_WATCHDOG_INTERVAL_MS = 30_000;
+const MAX_TRANSPORT_RETRIES = 10;
 let fetchHeaderTimeoutMs = 60_000;
 let fetchHeaderTimeoutRetries = 1;
 
@@ -50,7 +51,7 @@ export async function postCodex(
   opts: PostCodexOptions = {},
 ): Promise<CodexResponse> {
   const log = ctx.childLogger("codex.client");
-  return retryHeaderTimeouts(
+  return retryTransientPostFailures(
     () =>
       retryOn429(() => attemptPostCodex(body, ctx, log, opts), {
         log,
@@ -66,7 +67,7 @@ export async function postCodex(
   );
 }
 
-async function retryHeaderTimeouts(
+async function retryTransientPostFailures(
   run: () => Promise<CodexResponse>,
   log: Logger,
   signal: AbortSignal | undefined,
@@ -76,14 +77,21 @@ async function retryHeaderTimeouts(
     try {
       return await run();
     } catch (err) {
-      if (!(err instanceof CodexHeaderTimeoutError) || attempt >= fetchHeaderTimeoutRetries)
-        throw err;
-      const waitMs = fetchHeaderTimeoutMs <= 10 ? 0 : 500 + Math.round(Math.random() * 1000);
-      log.warn("codex response headers timed out, retrying", {
+      const retryInfo = codexPostRetryInfo(err);
+      if (!retryInfo || attempt >= retryInfo.maxRetries) throw err;
+      const waitMs =
+        err instanceof CodexHeaderTimeoutError
+          ? fetchHeaderTimeoutMs <= 10
+            ? 0
+            : 500 + Math.round(Math.random() * 1000)
+          : computeBackoffDelay(attempt).waitMs;
+      log.warn(retryInfo.message, {
+        reason: retryInfo.reason,
         attempt: attempt + 1,
-        maxRetries: fetchHeaderTimeoutRetries,
+        maxRetries: retryInfo.maxRetries,
         waitMs,
-        timeoutMs: fetchHeaderTimeoutMs,
+        err: describeError(err),
+        timeoutMs: err instanceof CodexHeaderTimeoutError ? fetchHeaderTimeoutMs : undefined,
         model: body.model,
         inputCount: body.input.length,
         toolCount: body.tools?.length ?? 0,
@@ -92,6 +100,26 @@ async function retryHeaderTimeouts(
       await sleep(waitMs, signal);
     }
   }
+}
+
+function codexPostRetryInfo(
+  err: unknown,
+): { reason: "header_timeout" | "transport"; maxRetries: number; message: string } | undefined {
+  if (err instanceof CodexHeaderTimeoutError) {
+    return {
+      reason: "header_timeout",
+      maxRetries: fetchHeaderTimeoutRetries,
+      message: "codex response headers timed out, retrying",
+    };
+  }
+  if (err instanceof CodexTransportError) {
+    return {
+      reason: "transport",
+      maxRetries: MAX_TRANSPORT_RETRIES,
+      message: "codex transport error before response, retrying",
+    };
+  }
+  return undefined;
 }
 
 async function attemptPostCodex(
@@ -364,6 +392,9 @@ async function doFetchHttp(
     if (headerTimeout.signal.reason instanceof CodexHeaderTimeoutError) {
       throw headerTimeout.signal.reason;
     }
+    if (!ctx.signal.aborted && isRetryableCodexTransportError(err)) {
+      throw new CodexTransportError(err);
+    }
     throw err;
   } finally {
     ctx.signal.removeEventListener("abort", onAbort);
@@ -390,13 +421,22 @@ function isSafeFullWebSocketRetry(
 
 function shouldResetWebSocketPool(continuation: ContinuationCandidate | undefined): boolean {
   if (!continuation?.disabledReason) return false;
-  return continuation.disabledReason !== "missing_state" && continuation.disabledReason !== "disabled";
+  return (
+    continuation.disabledReason !== "missing_state" && continuation.disabledReason !== "disabled"
+  );
 }
 
 export class CodexHeaderTimeoutError extends Error {
   constructor(public timeoutMs: number) {
     super(`Timed out waiting ${timeoutMs}ms for Codex response headers`);
     this.name = "CodexHeaderTimeoutError";
+  }
+}
+
+export class CodexTransportError extends Error {
+  constructor(public originalError: unknown) {
+    super(errorMessage(originalError));
+    this.name = "CodexTransportError";
   }
 }
 
@@ -410,4 +450,56 @@ export class CodexError extends Error {
     super(message);
     this.name = "CodexError";
   }
+}
+
+export function isRetryableCodexTransportError(err: unknown): boolean {
+  if (isAbortError(err)) return false;
+  const text = errorSearchText(err);
+  return (
+    text.includes("socket connection was closed unexpectedly") ||
+    text.includes("connection closed unexpectedly") ||
+    text.includes("connection reset") ||
+    text.includes("econnreset") ||
+    text.includes("epipe") ||
+    text.includes("etimedout") ||
+    text.includes("und_err_socket") ||
+    text.includes("fetch failed")
+  );
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function errorSearchText(err: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; current && depth < 4; depth++) {
+    if (current instanceof Error) {
+      parts.push(current.name, current.message);
+      const code = (current as Error & { code?: unknown }).code;
+      if (code !== undefined) parts.push(String(code));
+      current = (current as Error & { cause?: unknown }).cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+  return parts.join(" ").toLowerCase();
+}
+
+function describeError(err: unknown): Record<string, unknown> {
+  if (!(err instanceof Error)) return { message: String(err) };
+  const code = (err as Error & { code?: unknown }).code;
+  return {
+    name: err.name,
+    message: err.message,
+    code,
+    cause:
+      err.cause instanceof Error ? { name: err.cause.name, message: err.cause.message } : err.cause,
+  };
 }

@@ -687,7 +687,7 @@ function upstreamFailureKind(
     type === "server_error" ||
     type === "internal_server_error" ||
     type === "internal_error" ||
-    lowerMessage.includes("you can retry your request")
+    isRetryableTransportOrServerMessage(lowerMessage)
   ) {
     return "transient";
   }
@@ -727,7 +727,24 @@ function isCodexWebSocketCloseError(err: unknown): boolean {
 function upstreamReadError(err: unknown): Error {
   if (err instanceof UpstreamStreamError) return err;
   const message = err instanceof Error ? err.message : String(err);
-  return new UpstreamStreamError("failed", `Upstream stream read failed: ${message}`);
+  return new UpstreamStreamError(
+    isRetryableTransportOrServerMessage(message.toLowerCase()) ? "transient" : "failed",
+    `Upstream stream read failed: ${message}`,
+  );
+}
+
+function isRetryableTransportOrServerMessage(lowerMessage: string): boolean {
+  return (
+    lowerMessage.includes("you can retry your request") ||
+    lowerMessage.includes("socket connection was closed unexpectedly") ||
+    lowerMessage.includes("connection closed unexpectedly") ||
+    lowerMessage.includes("connection reset") ||
+    lowerMessage.includes("econnreset") ||
+    lowerMessage.includes("epipe") ||
+    lowerMessage.includes("etimedout") ||
+    lowerMessage.includes("und_err_socket") ||
+    lowerMessage.includes("fetch failed")
+  );
 }
 
 export function mapUsageToAnthropic(
