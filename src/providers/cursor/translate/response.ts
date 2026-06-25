@@ -32,16 +32,21 @@ export interface AnthropicUsage {
   cache_read_input_tokens: number;
 }
 
-export function cursorUsageToAnthropic(usage?: CursorUsage): AnthropicUsage {
-  const input = toNumber(usage?.inputTokens);
+export function cursorUsageToAnthropic(
+  usage?: CursorUsage,
+  opts: { inputTokens?: number } = {},
+): AnthropicUsage {
+  const input = opts.inputTokens ?? toNumber(usage?.inputTokens);
   const output = toNumber(usage?.outputTokens);
-  const cacheRead = toNumber(usage?.cacheReadTokens);
-  const cacheWrite = toNumber(usage?.cacheWriteTokens);
+  // Cursor's turnEnded token counters are aggregate agent-run/billing counters,
+  // not Anthropic-style current prompt-window counters. Claude Code uses these
+  // fields for active context/autocompact, so prefer our request-side input
+  // estimate and suppress Cursor cache counters.
   return {
-    input_tokens: Math.max(0, input - cacheRead - cacheWrite),
+    input_tokens: input,
     output_tokens: output,
-    cache_creation_input_tokens: cacheWrite,
-    cache_read_input_tokens: cacheRead,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
   };
 }
 
@@ -55,6 +60,7 @@ export async function accumulateCursorResponse(
     proto?: CursorProto;
     onSession?: (sessionId: string) => void;
     allowedToolNames?: ReadonlySet<string>;
+    inputTokens?: number;
   },
 ): Promise<{ response: AnthropicCursorResponse; cursorSessionId?: string }> {
   let thinking = "";
@@ -139,7 +145,7 @@ export async function accumulateCursorResponse(
       content,
       stop_reason: toolUseXml.sawToolUse ? "tool_use" : "end_turn",
       stop_sequence: null,
-      usage: cursorUsageToAnthropic(usage),
+      usage: cursorUsageToAnthropic(usage, { inputTokens: opts.inputTokens }),
     },
   };
 }
@@ -155,6 +161,7 @@ export function translateCursorStream(
     proto?: CursorProto;
     onSession?: (sessionId: string) => void;
     allowedToolNames?: ReadonlySet<string>;
+    inputTokens?: number;
   },
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -173,7 +180,8 @@ export function translateCursorStream(
         messageId: opts.messageId,
         model: opts.model,
         emit,
-        mapUsage: cursorUsageToAnthropic,
+        mapUsage: (usage) => cursorUsageToAnthropic(usage, { inputTokens: opts.inputTokens }),
+        initialUsage: cursorUsageToAnthropic(undefined, { inputTokens: opts.inputTokens }),
       });
       const toolUseXml = new CursorToolUseXmlParser({ allowedToolNames: opts.allowedToolNames });
 

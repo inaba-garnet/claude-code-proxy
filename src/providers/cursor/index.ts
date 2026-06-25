@@ -71,6 +71,7 @@ async function handleMessages(
 
   const selection = resolveCursorModel(body);
   const prompt = renderCursorPrompt(body);
+  const inputTokens = countCursorTokens(body);
   const selectedImages = cursorSelectedImages(body);
   const wantStream = wantsDownstreamStream(body);
   const conversationId = cursorConversationForRequest(body, ctx.sessionId);
@@ -103,6 +104,7 @@ async function handleMessages(
       sessionId: ctx.sessionId,
       messageId,
       model: body.model,
+      inputTokens,
       log: ctx.childLogger("cursor.bridge"),
       traffic: ctx.traffic,
       proto: deps.proto,
@@ -164,6 +166,7 @@ async function handleMessages(
       proto: deps.proto,
       onSession,
       allowedToolNames,
+      inputTokens,
     });
     return sseResponse(stream);
   }
@@ -177,6 +180,7 @@ async function handleMessages(
       proto: deps.proto,
       onSession,
       allowedToolNames,
+      inputTokens,
     });
     return jsonResponse(result.response);
   } catch (err) {

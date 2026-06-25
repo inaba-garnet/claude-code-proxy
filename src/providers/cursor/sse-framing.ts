@@ -8,6 +8,12 @@ interface CursorSseFramingOptions {
   model: string;
   emit: (event: string, data: unknown) => boolean;
   mapUsage: (usage?: CursorUsage) => unknown;
+  initialUsage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens: number;
+    cache_read_input_tokens: number;
+  };
 }
 
 export interface CursorSseFramer {
@@ -40,7 +46,11 @@ export function createCursorSseFramer(opts: CursorSseFramingOptions): CursorSseF
   const ensureStart = () => {
     if (started) return;
     started = true;
-    emitMessageStart(emit, { messageId: opts.messageId, model: opts.model });
+    emitMessageStart(emit, {
+      messageId: opts.messageId,
+      model: opts.model,
+      usage: opts.initialUsage,
+    });
   };
 
   const openThinking = () => {

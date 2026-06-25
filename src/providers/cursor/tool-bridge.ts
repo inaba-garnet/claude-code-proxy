@@ -2,6 +2,7 @@ import { encodeSseEvent } from "../../sse.ts";
 import type { AnthropicRequest, AnthropicToolResultBlock } from "../../anthropic/schema.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestContext } from "../types.ts";
+import { countCursorTokens } from "./count-tokens.ts";
 import {
   appendCursorReadResult,
   appendCursorShellStreamResult,
@@ -64,6 +65,7 @@ interface CursorBridgeState {
   sessionId: string;
   messageId: string;
   model: string;
+  inputTokens?: number;
   iterator: AsyncGenerator<CursorStreamEvent>;
   pendingNext?: Promise<IteratorResult<CursorStreamEvent>>;
   pendingTool?: PendingNativeTool;
@@ -135,6 +137,7 @@ export function createCursorShellToolBridge(opts: {
   sessionId: string;
   messageId: string;
   model: string;
+  inputTokens?: number;
   log: Logger;
   traffic?: RequestContext["traffic"];
   proto?: CursorProto;
@@ -150,6 +153,7 @@ export function createCursorShellToolBridge(opts: {
     sessionId: opts.sessionId,
     messageId: opts.messageId,
     model: opts.model,
+    inputTokens: opts.inputTokens,
     iterator: undefined as unknown as AsyncGenerator<CursorStreamEvent>,
     waiters: [],
     log: opts.log,
@@ -302,6 +306,7 @@ export function resumeCursorShellToolBridge(
   state.pendingTool = undefined;
   state.messageId = messageId;
   state.model = body.model;
+  state.inputTokens = countCursorTokens(body);
   tool.resolve({
     content: renderToolResultContent(result.content),
     isError: Boolean(result.is_error),
@@ -337,7 +342,8 @@ function streamBridgeUntilToolOrEnd(
         messageId: state.messageId,
         model: state.model,
         emit,
-        mapUsage: cursorUsageToAnthropic,
+        mapUsage: (usage) => cursorUsageToAnthropic(usage, { inputTokens: state.inputTokens }),
+        initialUsage: cursorUsageToAnthropic(undefined, { inputTokens: state.inputTokens }),
       });
       const toolUseXml = new CursorToolUseXmlParser({ allowedToolNames: state.allowedToolNames });
 
