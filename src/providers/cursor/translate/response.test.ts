@@ -39,6 +39,7 @@ async function translateCursorSse(
   frames: Uint8Array[],
   messageId: string,
   allowedToolNames?: ReadonlySet<string>,
+  inputTokens?: number,
 ): Promise<Array<{ event: string; data: any }>> {
   const downstream = translateCursorStream(
     streamFromChunks(frames),
@@ -48,25 +49,45 @@ async function translateCursorSse(
       log: createLogger("cursor.response.test"),
       proto: fakeProto,
       allowedToolNames,
+      inputTokens,
     },
   );
   return collectCursorSse(downstream);
 }
 
 describe("Cursor response translation", () => {
-  it("maps usage tokens including cache reads and writes", () => {
+  it("does not expose Cursor aggregate cache counters as Anthropic context cache", () => {
     expect(
       cursorUsageToAnthropic({
         inputTokens: "100",
         outputTokens: "7",
-        cacheReadTokens: "20",
-        cacheWriteTokens: "3",
+        cacheReadTokens: "4490752",
+        cacheWriteTokens: "3000",
       }),
     ).toEqual({
-      input_tokens: 77,
+      input_tokens: 100,
       output_tokens: 7,
-      cache_creation_input_tokens: 3,
-      cache_read_input_tokens: 20,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
+  });
+
+  it("uses request-side input estimates instead of Cursor aggregate input counters", () => {
+    expect(
+      cursorUsageToAnthropic(
+        {
+          inputTokens: "2116658",
+          outputTokens: "5576",
+          cacheReadTokens: "1976832",
+          cacheWriteTokens: "0",
+        },
+        { inputTokens: 135246 },
+      ),
+    ).toEqual({
+      input_tokens: 135246,
+      output_tokens: 5576,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
     });
   });
 
@@ -235,6 +256,40 @@ describe("Cursor response translation", () => {
     expect(events[3]?.data.delta).toEqual({ type: "thinking_delta", thinking: "plan" });
     expect(events[6]?.data.delta).toEqual({ type: "text_delta", text: "done" });
     expect(events[8]?.data.usage.output_tokens).toBe(3);
+  });
+
+  it("emits estimated input usage at stream start and finish", async () => {
+    const events = await translateCursorSse(
+      [
+        frame({ interactionUpdate: { textDelta: { text: "done" } } }),
+        frame({
+          interactionUpdate: {
+            turnEnded: {
+              inputTokens: "2116658",
+              outputTokens: "5576",
+              cacheReadTokens: "1976832",
+            },
+          },
+        }),
+        encodeConnectFrame(jsonBytes({}), 2),
+      ],
+      "msg_estimated_usage",
+      undefined,
+      135246,
+    );
+
+    expect(events[0]?.data.message.usage).toMatchObject({
+      input_tokens: 135246,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
+    expect(events.find((event) => event.event === "message_delta")?.data.usage).toEqual({
+      input_tokens: 135246,
+      output_tokens: 5576,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
   });
 
   it("recovers XML tool_use text deltas as Anthropic tool calls", async () => {

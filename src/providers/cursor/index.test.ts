@@ -257,9 +257,12 @@ describe("Cursor provider messages", () => {
     );
     const initialEvents = await collectCursorSse(initial);
     const toolStart = getToolUseStartEvent(initialEvents);
+    const initialStop = findCursorSseEvent(initialEvents, "message_delta");
 
     expect(toolStart?.data.content_block.name).toBe("Bash");
     expect(toolStart?.data.content_block.id).toStartWith("call_cursor_");
+    expect(initialStop?.data.usage.input_tokens).toBeGreaterThan(0);
+    expect(initialStop?.data.usage.cache_read_input_tokens).toBe(0);
     const toolInputDelta = getInputJsonDeltaEvent(initialEvents);
     expect(JSON.parse(toolInputDelta?.data.delta.partial_json).command).toBe(
       "cd '/tmp/cursor bridge cwd' && printf should-not-run",

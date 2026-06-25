@@ -8,7 +8,16 @@
  */
 export function emitMessageStart(
   emit: (event: string, data: unknown) => void,
-  opts: { messageId: string; model: string },
+  opts: {
+    messageId: string;
+    model: string;
+    usage?: {
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_input_tokens: number;
+      cache_read_input_tokens: number;
+    };
+  },
 ): void {
   emit("message_start", {
     type: "message_start",
@@ -20,7 +29,7 @@ export function emitMessageStart(
       content: [],
       stop_reason: null,
       stop_sequence: null,
-      usage: {
+      usage: opts.usage ?? {
         input_tokens: 0,
         output_tokens: 0,
         cache_creation_input_tokens: 0,
