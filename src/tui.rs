@@ -62,6 +62,7 @@ pub fn run_monitor(
 
     loop {
         let state = handle.snapshot();
+        app.clamp_selection(state.sessions.len());
         app.tick = app.tick.wrapping_add(1);
         terminal.draw(|frame| render(frame, &mut app, &state))?;
         if event::poll(Duration::from_millis(250))? {
@@ -78,7 +79,10 @@ pub fn run_monitor(
                     KeyCode::Char('?') => app.show_help = !app.show_help,
                     KeyCode::Char('b') => app.show_setup = !app.show_setup,
                     KeyCode::Down | KeyCode::Char('j') => {
-                        app.selected = app.selected.saturating_add(1)
+                        app.selected = app
+                            .selected
+                            .saturating_add(1)
+                            .min(state.sessions.len().saturating_sub(1))
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         app.selected = app.selected.saturating_sub(1)
@@ -113,6 +117,12 @@ struct MonitorApp {
     selected: usize,
     tick: usize,
     shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl MonitorApp {
+    fn clamp_selection(&mut self, len: usize) {
+        self.selected = self.selected.min(len.saturating_sub(1));
+    }
 }
 
 impl Drop for MonitorApp {
@@ -752,4 +762,29 @@ fn format_system_time(time: SystemTime) -> String {
         (seconds % 3600) / 60,
         seconds % 60
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_selection_caps_to_available_sessions() {
+        let mut app = MonitorApp {
+            port: 3000,
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            detail: false,
+            selected: 10,
+            tick: 0,
+            shutdown: None,
+        };
+
+        app.clamp_selection(3);
+        assert_eq!(app.selected, 2);
+
+        app.clamp_selection(0);
+        assert_eq!(app.selected, 0);
+    }
 }
