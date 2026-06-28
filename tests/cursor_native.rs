@@ -700,6 +700,467 @@ async fn cursor_provider_handle_messages_returns_anthropic_json() {
 }
 
 // ---------------------------------------------------------------------------
+// Cursor tool bridge integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bridge_start_pauses_on_tool_use_xml() {
+    use claude_code_proxy::providers::cursor::response::*;
+    use claude_code_proxy::providers::cursor::tool_bridge::*;
+
+    // Create upstream events with a text delta containing XML tool_use
+    let events = vec![
+        CursorStreamEvent::TextDelta {
+            text: "before ".to_string(),
+        },
+        CursorStreamEvent::TextDelta {
+            text: r#"<tool_use id="x" name="Read">{"file_path":"/tmp/a"}</tool_use>"#.to_string(),
+        },
+        CursorStreamEvent::TextDelta {
+            text: " after".to_string(),
+        },
+        CursorStreamEvent::Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+        CursorStreamEvent::End,
+    ];
+
+    let allowed: std::collections::BTreeSet<String> =
+        ["Read".to_string(), "Write".to_string(), "Bash".to_string()]
+            .into_iter()
+            .collect();
+
+    let mut counter = 0u64;
+    let id_factory = Box::new(move || {
+        counter += 1;
+        format!("call_cursor_test_{counter}")
+    });
+
+    let (sse, paused) = start_cursor_tool_bridge(
+        "msg_1",
+        "cursor-test",
+        "session-bridge-1",
+        &events,
+        Some(allowed),
+        id_factory,
+    );
+
+    assert!(paused, "bridge should pause on tool_use");
+
+    let sse_str = String::from_utf8_lossy(&sse);
+    let parsed = parse_sse_events(&sse_str);
+
+    let event_names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        event_names.contains(&"content_block_start"),
+        "expected content_block_start for tool_use"
+    );
+    assert!(
+        event_names.contains(&"message_stop"),
+        "expected message_stop"
+    );
+
+    let msg_delta = parsed
+        .iter()
+        .find(|(n, _)| n == "message_delta")
+        .map(|(_, d)| d.clone());
+    assert!(msg_delta.is_some(), "expected message_delta");
+    assert_eq!(
+        msg_delta.unwrap()["delta"]["stop_reason"],
+        "tool_use",
+        "stop_reason should be tool_use"
+    );
+
+    // Clean up
+    BridgeRegistry::remove("session-bridge-1");
+}
+
+#[test]
+fn bridge_start_passes_through_without_tool_use() {
+    use claude_code_proxy::providers::cursor::response::*;
+    use claude_code_proxy::providers::cursor::tool_bridge::*;
+
+    let events = vec![
+        CursorStreamEvent::TextDelta {
+            text: "hello world".to_string(),
+        },
+        CursorStreamEvent::Usage {
+            input_tokens: 5,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+        CursorStreamEvent::End,
+    ];
+
+    let (sse, paused) = start_cursor_tool_bridge(
+        "msg_2",
+        "cursor-test",
+        "session-bridge-2",
+        &events,
+        None,
+        Box::new(|| "id".into()),
+    );
+
+    assert!(!paused, "bridge should NOT pause without tool_use");
+
+    let sse_str = String::from_utf8_lossy(&sse);
+    let parsed = parse_sse_events(&sse_str);
+    let event_names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
+
+    assert!(event_names.contains(&"message_start"));
+    assert!(event_names.contains(&"content_block_delta"));
+    assert!(event_names.contains(&"message_delta"));
+    assert!(event_names.contains(&"message_stop"));
+
+    // Verify stop_reason is end_turn
+    let msg_delta = parsed
+        .iter()
+        .find(|(n, _)| n == "message_delta")
+        .map(|(_, d)| d.clone());
+    assert_eq!(
+        msg_delta.unwrap()["delta"]["stop_reason"],
+        "end_turn",
+        "stop_reason should be end_turn without tool_use"
+    );
+}
+
+#[test]
+fn bridge_start_creates_pending_tool_in_registry() {
+    use claude_code_proxy::providers::cursor::response::*;
+    use claude_code_proxy::providers::cursor::tool_bridge::*;
+
+    // Clean state
+    BridgeRegistry::clear();
+
+    let events = vec![CursorStreamEvent::TextDelta {
+        text: r#"<tool_use name="Read">{"file_path":"/tmp/test"}</tool_use>"#.to_string(),
+    }];
+
+    let allowed: std::collections::BTreeSet<String> = ["Read".to_string()].into_iter().collect();
+
+    let (_, paused) = start_cursor_tool_bridge(
+        "msg_3",
+        "cursor-test",
+        "session-bridge-pt",
+        &events,
+        Some(allowed),
+        Box::new(|| "call_test".into()),
+    );
+
+    assert!(paused);
+
+    let pending = BridgeRegistry::pending_tool("session-bridge-pt");
+    assert!(pending.is_some(), "pending tool should be stored");
+    assert_eq!(pending.unwrap().name(), "Read");
+
+    BridgeRegistry::remove("session-bridge-pt");
+}
+
+#[test]
+fn bridge_resume_continues_after_tool_use_pause() {
+    use claude_code_proxy::providers::cursor::response::*;
+    use claude_code_proxy::providers::cursor::tool_bridge::*;
+
+    BridgeRegistry::clear();
+
+    // Events: tool_use in the middle, text after
+    let events = vec![
+        CursorStreamEvent::TextDelta {
+            text: "before ".to_string(),
+        },
+        CursorStreamEvent::TextDelta {
+            text: r#"<tool_use name="Read">{"file_path":"/tmp/a"}</tool_use>"#.to_string(),
+        },
+        CursorStreamEvent::TextDelta {
+            text: " continued".to_string(),
+        },
+        CursorStreamEvent::Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+        CursorStreamEvent::End,
+    ];
+
+    let allowed: std::collections::BTreeSet<String> = ["Read".to_string()].into_iter().collect();
+
+    let mut counter = 0u64;
+    let id_factory = Box::new(move || {
+        counter += 1;
+        format!("call_cursor_test_{counter}")
+    });
+
+    let (_first_sse, paused) = start_cursor_tool_bridge(
+        "msg_first",
+        "cursor-test",
+        "session-resume-1",
+        &events,
+        Some(allowed),
+        id_factory,
+    );
+    assert!(paused);
+
+    let body: claude_code_proxy::MessagesRequest =
+        serde_json::from_value(serde_json::json!({
+            "model": "cursor-test",
+            "messages": [
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_cursor_test_1", "content": "result text"}]}
+            ]
+        }))
+        .unwrap();
+
+    let pending =
+        BridgeRegistry::pending_tool("session-resume-1").expect("should have pending tool");
+    assert_eq!(pending.tool_use_id(), "call_cursor_test_1");
+
+    let result = find_tool_result(&body, pending.tool_use_id()).expect("should find tool result");
+
+    let (result_msgs, second_sse) = resume_cursor_tool_bridge(
+        "session-resume-1",
+        "msg_second",
+        "cursor-test",
+        result,
+        &pending,
+    );
+
+    assert!(!result_msgs.is_empty(), "should have result messages");
+
+    let sse_str = String::from_utf8_lossy(&second_sse);
+    let parsed = parse_sse_events(&sse_str);
+    let event_names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
+
+    assert!(
+        event_names.contains(&"message_start"),
+        "resume should have message_start in {event_names:?}"
+    );
+    assert!(
+        event_names.contains(&"message_stop"),
+        "resume should have message_stop in {event_names:?}"
+    );
+
+    let text_deltas: Vec<&str> = parsed
+        .iter()
+        .filter_map(|(n, d)| {
+            if n == "content_block_delta" {
+                d["delta"]["text"].as_str()
+            } else {
+                None
+            }
+        })
+        .collect();
+    let combined = text_deltas.join("");
+    assert!(
+        combined.contains("continued"),
+        "resume should include remaining text deltas"
+    );
+
+    BridgeRegistry::remove("session-resume-1");
+}
+
+#[test]
+fn bridge_rejects_tool_not_in_allowed_list() {
+    use claude_code_proxy::providers::cursor::response::*;
+    use claude_code_proxy::providers::cursor::tool_bridge::*;
+
+    BridgeRegistry::clear();
+
+    let events = vec![CursorStreamEvent::TextDelta {
+        text: r#"<tool_use name="Bash">{"command":"pwd"}</tool_use>"#.to_string(),
+    }];
+
+    let allowed: std::collections::BTreeSet<String> = ["Read".to_string()].into_iter().collect();
+
+    let (sse, paused) = start_cursor_tool_bridge(
+        "msg_filter",
+        "cursor-test",
+        "session-filter-1",
+        &events,
+        Some(allowed),
+        Box::new(|| "id".into()),
+    );
+
+    assert!(!paused, "should NOT pause for disallowed tool");
+
+    let sse_str = String::from_utf8_lossy(&sse);
+    let parsed = parse_sse_events(&sse_str);
+    let _event_names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
+
+    let msg_delta = parsed
+        .iter()
+        .find(|(n, _)| n == "message_delta")
+        .map(|(_, d)| d.clone());
+    assert_eq!(
+        msg_delta.unwrap()["delta"]["stop_reason"],
+        "end_turn",
+        "disallowed tool should not trigger tool_use"
+    );
+
+    BridgeRegistry::remove("session-filter-1");
+}
+
+#[test]
+fn bridge_result_messages_have_correct_read_shape() {
+    use claude_code_proxy::providers::cursor::tool_bridge::*;
+
+    let exec = CursorExec {
+        id: Some(42),
+        exec_id: None,
+        args: serde_json::json!({"file_path": "/tmp/readme.txt"}),
+    };
+    let result = CursorNativeToolResult {
+        content: "file contents here".into(),
+        is_error: false,
+    };
+
+    let msg = build_read_result_from_native(&exec, &result);
+    let msg_obj = msg.as_object().unwrap();
+
+    assert_eq!(msg_obj.get("id").and_then(|v| v.as_i64()), Some(42));
+
+    let read_result = msg_obj.get("readResult").unwrap();
+    assert!(read_result.get("success").is_some());
+    let success = read_result.get("success").unwrap();
+    assert_eq!(
+        success.get("path").and_then(|v| v.as_str()),
+        Some("/tmp/readme.txt")
+    );
+    assert_eq!(
+        success.get("content").and_then(|v| v.as_str()),
+        Some("file contents here")
+    );
+    assert_eq!(success.get("totalLines").and_then(|v| v.as_i64()), Some(1));
+}
+
+#[test]
+fn bridge_result_messages_have_correct_write_shape() {
+    use claude_code_proxy::providers::cursor::tool_bridge::*;
+
+    let exec = CursorExec {
+        id: Some(99),
+        exec_id: Some("exec-write-1".into()),
+        args: serde_json::json!({"file_path": "/tmp/writeme.txt", "content": "data"}),
+    };
+
+    let result = CursorNativeToolResult {
+        content: "written".into(),
+        is_error: false,
+    };
+    let msg = build_write_result_from_native(&exec, &result);
+    let msg_obj = msg.as_object().unwrap();
+    assert_eq!(
+        msg_obj.get("execId").and_then(|v| v.as_str()),
+        Some("exec-write-1")
+    );
+    let write_result = msg_obj.get("writeResult").unwrap();
+    let success = write_result.get("success").unwrap();
+    assert_eq!(
+        success.get("path").and_then(|v| v.as_str()),
+        Some("/tmp/writeme.txt")
+    );
+    assert!(success.get("linesCreated").is_some());
+    assert!(success.get("fileSize").is_some());
+
+    let error_result = CursorNativeToolResult {
+        content: "permission denied".into(),
+        is_error: true,
+    };
+    let err_msg = build_write_result_from_native(&exec, &error_result);
+    let err_obj = err_msg.as_object().unwrap();
+    let write_result = err_obj.get("writeResult").unwrap();
+    let error = write_result.get("error").unwrap();
+    assert_eq!(
+        error.get("path").and_then(|v| v.as_str()),
+        Some("/tmp/writeme.txt")
+    );
+    assert!(
+        error
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("permission")
+    );
+}
+
+#[test]
+fn bridge_shell_stream_result_has_correct_shape() {
+    use claude_code_proxy::providers::cursor::tool_bridge::*;
+
+    let exec = CursorExec {
+        id: Some(7),
+        exec_id: Some("exec-shell".into()),
+        args: serde_json::json!({}),
+    };
+
+    let result = CursorNativeToolResult {
+        content: "stdout output".into(),
+        is_error: false,
+    };
+
+    let messages = build_shell_stream_result(
+        &exec,
+        &result,
+        std::time::Duration::from_millis(150),
+        "/home/user",
+    );
+
+    assert_eq!(messages.len(), 4, "start + stdout + exit + close");
+
+    assert!(
+        messages[0]
+            .get("shellStream")
+            .and_then(|s| s.get("start"))
+            .is_some()
+    );
+
+    assert_eq!(
+        messages[1]["shellStream"]["stdout"]["data"],
+        "stdout output"
+    );
+
+    assert_eq!(messages[2]["shellStream"]["exit"]["code"], 0);
+    assert_eq!(messages[2]["shellStream"]["exit"]["cwd"], "/home/user");
+
+    assert_eq!(
+        messages[3]["execClientControlMessage"]["streamClose"]["id"],
+        7
+    );
+}
+
+// ---------------------------------------------------------------------------
+// No TypeScript sidecar
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cursor_provider_has_no_typescript_sidecar() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers/cursor");
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        match std::fs::read_dir(&dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        stack.push(path);
+                        continue;
+                    }
+                    let ext = path.extension().and_then(|e| e.to_str());
+                    assert_ne!(ext, Some("ts"), "TypeScript file found at {:?}", path);
+                }
+            }
+            Err(_) => {
+                // Directory may not exist (e.g., if cursor provider was removed)
+                return;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SSE parser helper (mirrors sse.rs internal helper for cross-module access)
 // ---------------------------------------------------------------------------
 

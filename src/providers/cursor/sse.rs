@@ -82,7 +82,7 @@ fn format_sse_error(error: &str) -> Vec<u8> {
 }
 
 /// Format a single SSE event into bytes.
-fn format_sse_event_bytes(event: &str, data: &serde_json::Value) -> Vec<u8> {
+pub(crate) fn format_sse_event_bytes(event: &str, data: &serde_json::Value) -> Vec<u8> {
     let json_str = serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string());
     format!("event: {event}\ndata: {json_str}\n\n").into_bytes()
 }
@@ -125,7 +125,7 @@ impl<'a> CursorSseFramer<'a> {
         }
     }
 
-    fn ensure_start(&mut self) {
+    pub fn ensure_start(&mut self) {
         if self.started {
             return;
         }
@@ -196,7 +196,7 @@ impl<'a> CursorSseFramer<'a> {
             .extend_from_slice(&format_sse_event_bytes(EVENT_CONTENT_BLOCK_START, &data));
     }
 
-    fn close_open_blocks(&mut self) {
+    pub fn close_open_blocks(&mut self) {
         if self.thinking_open {
             let data = serde_json::json!({
                 "type": "content_block_stop",
@@ -264,6 +264,53 @@ impl<'a> CursorSseFramer<'a> {
     ) {
         self.usage_input_tokens = input_tokens;
         self.usage_output_tokens = output_tokens;
+    }
+
+    pub fn next_content_block_index(&mut self) -> i32 {
+        let index = self.next_index;
+        self.next_index += 1;
+        index
+    }
+
+    /// Emit a tool_use pause: content block + message_delta with
+    /// stop_reason="tool_use" + message_stop.
+    pub fn emit_tool_pause(&mut self, tool_use_id: &str, tool_name: &str, partial_json: &str) {
+        self.close_open_blocks();
+        self.ensure_start();
+        let index = self.next_content_block_index();
+
+        let data = serde_json::json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {
+                "type": "tool_use",
+                "id": tool_use_id,
+                "name": tool_name,
+                "input": {}
+            }
+        });
+        self.output
+            .extend_from_slice(&format_sse_event_bytes(EVENT_CONTENT_BLOCK_START, &data));
+
+        let data = serde_json::json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": partial_json
+            }
+        });
+        self.output
+            .extend_from_slice(&format_sse_event_bytes(EVENT_CONTENT_BLOCK_DELTA, &data));
+
+        let data = serde_json::json!({
+            "type": "content_block_stop",
+            "index": index
+        });
+        self.output
+            .extend_from_slice(&format_sse_event_bytes(EVENT_CONTENT_BLOCK_STOP, &data));
+
+        self.emit_final_message("tool_use");
     }
 
     pub fn emit_final_message(&mut self, stop_reason: &str) {
@@ -493,9 +540,6 @@ mod tests {
         let sse = frame_cursor_stream(&upstream, "msg_1", "cursor-test");
         let sse_str = String::from_utf8_lossy(&sse);
         let events = parse_sse_events(&sse_str);
-        let event_names: Vec<&str> = events.iter().map(|e| e.0.as_str()).collect();
-
-        // Should have thinking content block start and delta
         assert!(events.iter().any(|(_, data)| {
             data.get("content_block")
                 .and_then(|c| c.get("type"))

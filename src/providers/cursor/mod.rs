@@ -6,6 +6,8 @@ pub mod proto;
 pub mod request;
 pub mod response;
 pub mod sse;
+pub mod tool_bridge;
+pub mod tool_use_xml;
 
 use async_trait::async_trait;
 use axum::Json;
@@ -19,7 +21,11 @@ use crate::providers::cursor::auth::load_cursor_token;
 use crate::providers::cursor::client::CursorHttpClient;
 use crate::providers::cursor::model::resolve_cursor_model;
 use crate::providers::cursor::request::render_cursor_prompt;
-use crate::providers::cursor::response::decode_cursor_upstream;
+use crate::providers::cursor::response::{decode_cursor_upstream, decode_upstream_response};
+use crate::providers::cursor::tool_bridge::{
+    BridgeRegistry, advertised_tool_names, can_bridge_cursor_native_tools, find_tool_result,
+    resume_cursor_tool_bridge, start_cursor_tool_bridge,
+};
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -53,7 +59,7 @@ impl Provider for CursorProvider {
         &CURSOR_CLI
     }
 
-    async fn handle_messages(&self, body: MessagesRequest, _ctx: RequestContext) -> Response {
+    async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let want_stream = body.stream;
         let model = body.model.as_deref().unwrap_or("cursor");
@@ -65,6 +71,21 @@ impl Provider for CursorProvider {
                 "invalid_request_error",
                 format!("Model \"{model}\" is not supported: {e}"),
             );
+        }
+
+        if let Some(ref session_id) = ctx.session_id {
+            if let Some(pending) = BridgeRegistry::pending_tool(session_id) {
+                if let Some(result) = find_tool_result(&body, pending.tool_use_id()) {
+                    let (_result_messages, sse_bytes) =
+                        resume_cursor_tool_bridge(session_id, &message_id, model, result, &pending);
+                    let headers = [
+                        (http::header::CONTENT_TYPE, "text/event-stream"),
+                        (http::header::CACHE_CONTROL, "no-cache"),
+                        (http::header::CONNECTION, "keep-alive"),
+                    ];
+                    return (headers, sse_bytes).into_response();
+                }
+            }
         }
 
         let token = match load_cursor_token() {
@@ -90,13 +111,46 @@ impl Provider for CursorProvider {
         };
 
         if want_stream {
-            let sse_bytes = sse::frame_cursor_stream(&upstream, &message_id, model);
-            let headers = [
-                (http::header::CONTENT_TYPE, "text/event-stream"),
-                (http::header::CACHE_CONTROL, "no-cache"),
-                (http::header::CONNECTION, "keep-alive"),
-            ];
-            (headers, sse_bytes).into_response()
+            let session_id = ctx.session_id.as_deref();
+            let bridge_eligible = can_bridge_cursor_native_tools(&body, session_id);
+
+            if bridge_eligible {
+                let events = match decode_upstream_response(&upstream.body) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return json_error(
+                            StatusCode::BAD_GATEWAY,
+                            "api_error",
+                            format!("Response decoding error: {e}"),
+                        );
+                    }
+                };
+
+                let allowed = advertised_tool_names(&body);
+                let (sse_bytes, _paused) = start_cursor_tool_bridge(
+                    &message_id,
+                    model,
+                    session_id.unwrap(),
+                    &events,
+                    allowed,
+                    Box::new(|| uuid::Uuid::new_v4().to_string().replace('-', "")),
+                );
+
+                let headers = [
+                    (http::header::CONTENT_TYPE, "text/event-stream"),
+                    (http::header::CACHE_CONTROL, "no-cache"),
+                    (http::header::CONNECTION, "keep-alive"),
+                ];
+                (headers, sse_bytes).into_response()
+            } else {
+                let sse_bytes = sse::frame_cursor_stream(&upstream, &message_id, model);
+                let headers = [
+                    (http::header::CONTENT_TYPE, "text/event-stream"),
+                    (http::header::CACHE_CONTROL, "no-cache"),
+                    (http::header::CONNECTION, "keep-alive"),
+                ];
+                (headers, sse_bytes).into_response()
+            }
         } else {
             match decode_cursor_upstream(&upstream, &message_id, model) {
                 Ok(json) => (StatusCode::OK, Json(json)).into_response(),
