@@ -25,11 +25,13 @@ fn messages_fixture_and_sse_parsing() {
 
     let raw_sse = std::fs::read_to_string("tests/fixtures/sse-basic.txt").unwrap();
     let events = parse_sse_events(raw_sse.as_bytes());
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
     assert_eq!(events[0].event, None);
     assert_eq!(events[0].data, "{\"chunk\":1}");
-    assert_eq!(events[1].event.as_deref(), Some("final"));
-    assert_eq!(events[1].data, "{\"done\":true}");
+    assert_eq!(events[1].event.as_deref(), Some("update"));
+    assert_eq!(events[1].data, "{\"text\":\"line1\"}\n{\"text\":\"line2\"}");
+    assert_eq!(events[2].event.as_deref(), Some("final"));
+    assert_eq!(events[2].data, "{\"done\":true}");
 
     let (events_with_stats, stats) = parse_sse_events_with_stats(raw_sse.as_bytes());
     assert_eq!(events_with_stats.len(), events.len());
@@ -38,8 +40,14 @@ fn messages_fixture_and_sse_parsing() {
     let encoded = encode_sse_event(Some("message"), "{\"a\":1}\n{\"b\":2}");
     assert_eq!(
         encoded,
-        b"event: message\ndata: {\\\"a\\\":1}\ndata: {\\\"b\\\":2}\n\n".to_vec()
+        b"event: message\ndata: {\"a\":1}\ndata: {\"b\":2}\n\n".to_vec()
     );
+    let reparsed = parse_sse_events(&encoded);
+    assert_eq!(reparsed[0].event.as_deref(), Some("message"));
+    assert_eq!(reparsed[0].data, "{\"a\":1}\n{\"b\":2}");
+    let first_line: serde_json::Value =
+        serde_json::from_str(reparsed[0].data.lines().next().unwrap()).unwrap();
+    assert_eq!(first_line["a"], json!(1));
 }
 
 #[test]

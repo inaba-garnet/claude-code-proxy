@@ -361,8 +361,7 @@ async fn smoke_codex_websocket_messages_uses_mock_upstream() {
             String::from_utf8_lossy(&ws_body_bytes)
         );
     });
-    // WebSocket transport sends the ResponsesRequest JSON directly; the
-    // protocol context implies response.create so no "type" field is injected.
+    assert_eq!(sent["type"], "response.create");
     assert_eq!(sent["model"], "gpt-5.5");
     assert!(sent.get("stream").is_none());
 }

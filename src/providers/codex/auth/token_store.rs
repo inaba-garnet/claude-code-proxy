@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthStorage, FileAuthStore};
+use crate::auth::{AuthStorage, KeychainFileAuthStore, SystemKeychain};
 use crate::paths;
+
+pub const KEYCHAIN_SERVICE: &str = "claude-code-proxy.codex";
+pub const KEYCHAIN_ACCOUNT: &str = "auth";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredAuth {
@@ -38,14 +41,24 @@ impl<S: AuthStorage<StoredAuth>> CodexTokenStore<S> {
     }
 }
 
-pub fn file_store() -> CodexTokenStore<FileAuthStore<StoredAuth>> {
+pub type DefaultCodexAuthStore = KeychainFileAuthStore<StoredAuth, SystemKeychain>;
+
+pub fn file_store() -> CodexTokenStore<DefaultCodexAuthStore> {
     let primary = paths::provider_auth_file("codex");
     let legacy = paths::provider_legacy_auth_file("codex");
-    let store = FileAuthStore::new(
+    let store = KeychainFileAuthStore::new(
         primary.to_string_lossy().to_string(),
         legacy.to_string_lossy().to_string(),
+        KEYCHAIN_SERVICE,
+        KEYCHAIN_ACCOUNT,
+        use_macos_keychain(),
+        SystemKeychain,
     );
     CodexTokenStore::new(store)
+}
+
+fn use_macos_keychain() -> bool {
+    cfg!(target_os = "macos") && std::env::var_os("CCP_CONFIG_DIR").is_none()
 }
 
 #[cfg(test)]

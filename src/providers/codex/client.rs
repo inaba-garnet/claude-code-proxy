@@ -6,7 +6,7 @@ use crate::retry::{compute_backoff_delay, sleep};
 
 use super::auth::constants::{CODEX_API_ENDPOINT, ORIGINATOR};
 use super::auth::manager::CodexAuthManager;
-use super::auth::token_store::{StoredAuth, file_store};
+use super::auth::token_store::{DefaultCodexAuthStore, StoredAuth, file_store};
 use super::translate::request::ResponsesRequest;
 
 // ---------------------------------------------------------------------------
@@ -155,6 +155,7 @@ pub fn build_websocket_request(
 
     // Omit the stream field for WebSocket transport
     obj.remove("stream");
+    obj.insert("type".to_string(), serde_json::json!("response.create"));
 
     // Apply continuation if available
     if let Some(candidate) = continuation {
@@ -191,7 +192,7 @@ pub struct CodexResponse {
 
 pub struct CodexHttpClient {
     client: reqwest::Client,
-    auth_manager: CodexAuthManager<crate::auth::FileAuthStore<StoredAuth>>,
+    auth_manager: CodexAuthManager<DefaultCodexAuthStore>,
     base_url: String,
     header_timeout_ms: u64,
     #[allow(dead_code)]
@@ -222,7 +223,7 @@ impl CodexHttpClient {
 
     pub fn new_with_client(
         client: reqwest::Client,
-        auth_manager: CodexAuthManager<crate::auth::FileAuthStore<StoredAuth>>,
+        auth_manager: CodexAuthManager<DefaultCodexAuthStore>,
         base_url: String,
     ) -> Self {
         Self {
@@ -250,7 +251,7 @@ impl CodexHttpClient {
         }
     }
 
-    pub fn auth_manager(&self) -> &CodexAuthManager<crate::auth::FileAuthStore<StoredAuth>> {
+    pub fn auth_manager(&self) -> &CodexAuthManager<DefaultCodexAuthStore> {
         &self.auth_manager
     }
 
@@ -667,6 +668,10 @@ mod tests {
             reasoning: None,
         };
         let payload = build_websocket_request(&req, None);
+        assert_eq!(
+            payload.get("type").and_then(|v| v.as_str()),
+            Some("response.create")
+        );
         assert!(payload.get("stream").is_none());
         assert!(payload.get("previous_response_id").is_none());
     }

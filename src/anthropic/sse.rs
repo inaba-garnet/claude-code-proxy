@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use serde_json;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SseEvent {
@@ -30,9 +29,7 @@ pub fn parse_sse_events_with_stats(input: &[u8]) -> (Vec<SseEvent>, SseParseStat
         chunk_count += 1;
         bytes_read += segment.len() + 1;
         if segment.is_empty() {
-            if let Some(event) = parse_block(&block) {
-                events.push(event);
-            }
+            events.extend(parse_block(&block));
             block.clear();
             continue;
         }
@@ -42,10 +39,8 @@ pub fn parse_sse_events_with_stats(input: &[u8]) -> (Vec<SseEvent>, SseParseStat
         block.push_str(segment);
     }
 
-    if !block.is_empty()
-        && let Some(event) = parse_block(&block)
-    {
-        events.push(event);
+    if !block.is_empty() {
+        events.extend(parse_block(&block));
     }
 
     let event_count = events.len();
@@ -67,11 +62,7 @@ pub fn encode_sse_event(event: Option<&str>, data: &str) -> Vec<u8> {
     }
     for line in data.split('\n') {
         out.push_str("data: ");
-        let escaped = serde_json::to_string(line)
-            .ok()
-            .map(|encoded| encoded.trim_matches('"').to_string())
-            .unwrap_or_else(|| line.to_string());
-        out.push_str(&escaped);
+        out.push_str(line);
         out.push('\n');
     }
     out.push('\n');
@@ -94,7 +85,7 @@ fn normalize_lines(input: &str) -> String {
     normalized
 }
 
-fn parse_block(block: &str) -> Option<SseEvent> {
+fn parse_block(block: &str) -> Vec<SseEvent> {
     let mut event: Option<String> = None;
     let mut data_lines = Vec::new();
     let mut events = Vec::new();
@@ -102,12 +93,10 @@ fn parse_block(block: &str) -> Option<SseEvent> {
         if data_lines.is_empty() {
             return;
         }
-        if event.as_deref().is_none_or(|current| current == "final") {
-            events.push(SseEvent {
-                event,
-                data: data_lines.join("\n"),
-            });
-        }
+        events.push(SseEvent {
+            event,
+            data: data_lines.join("\n"),
+        });
         data_lines.clear();
     };
 
@@ -137,19 +126,5 @@ fn parse_block(block: &str) -> Option<SseEvent> {
 
     push_if_relevant(event.take(), &mut data_lines);
 
-    if events.is_empty() {
-        None
-    } else if events.len() == 1 {
-        events.pop()
-    } else {
-        // Keep behavior aligned with the expected upstream parser: when multiple
-        // events are present in a block, keep only the last event when it is
-        // final and otherwise surface nothing.
-        events.into_iter().last().filter(|event| {
-            event
-                .event
-                .as_deref()
-                .is_none_or(|current| current == "final")
-        })
-    }
+    events
 }
