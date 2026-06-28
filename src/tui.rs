@@ -52,7 +52,7 @@ pub fn run_monitor(
     let mut app = MonitorApp {
         port: config.port,
         setup_text: setup_text(config.port, config.registry),
-        show_setup: true,
+        show_setup: false,
         show_help: false,
         detail: false,
         selected: 0,
