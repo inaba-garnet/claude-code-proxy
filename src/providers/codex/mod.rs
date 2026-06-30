@@ -298,9 +298,19 @@ fn map_codex_error_to_response(err: &client::CodexError) -> Response {
         _ => json_error(
             StatusCode::BAD_GATEWAY,
             "api_error",
-            err.detail.as_deref().unwrap_or("Upstream error"),
+            codex_error_message(err),
         ),
     }
+}
+
+fn codex_error_message(err: &client::CodexError) -> &str {
+    err.detail.as_deref().unwrap_or_else(|| {
+        if err.status == 0 {
+            err.message.as_str()
+        } else {
+            "Upstream error"
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -510,5 +520,28 @@ mod tests {
         let now = 946684810000; // 10s after
         let output = format_expiry(expires, now);
         assert!(output.starts_with("Expires: 2000-01-01T00:00:00.000Z (in -"));
+    }
+
+    #[tokio::test]
+    async fn statusless_codex_error_returns_source_message() {
+        let err = client::CodexError {
+            status: 0,
+            message: "WebSocket connect error: HTTP error: 502 Bad Gateway".to_string(),
+            detail: None,
+            retry_after: None,
+            origin: client::CodexErrorOrigin::WebSocket,
+        };
+
+        let response = map_codex_error_to_response(&err);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body.pointer("/error/message").and_then(|v| v.as_str()),
+            Some("WebSocket connect error: HTTP error: 502 Bad Gateway")
+        );
     }
 }
