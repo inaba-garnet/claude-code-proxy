@@ -11,8 +11,9 @@
 - Codex WebSocket live streaming reuses pooled session sockets and applies
   `previous_response_id` continuations on append-only turns, reducing repeated
   upstream input for streaming sessions.
-- Codex requests forward Claude Code's `max_tokens` as `max_output_tokens`,
-  keeping upstream responses within Claude Code's configured output limit.
+- Codex WebSocket requests use the gateway-compatible request shape, so
+  `claude -p` jobs and release changelog generation avoid unsupported-parameter
+  failures.
 
 ## v0.1.2 (2026-06-30)
 

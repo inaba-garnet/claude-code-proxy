@@ -53,8 +53,6 @@ pub enum ResponsesToolChoice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponsesRequest {
     pub model: String,
-    #[serde(default = "default_max_output_tokens")]
-    pub max_output_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     pub input: Vec<ResponsesInputItem>,
@@ -185,8 +183,6 @@ pub struct TranslateOptions {
     pub model: String,
 }
 
-const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 32_000;
-
 // ---------------------------------------------------------------------------
 // Translation entry point
 // ---------------------------------------------------------------------------
@@ -291,7 +287,6 @@ pub fn translate_request(
 
     let mut out = ResponsesRequest {
         model: opts.model,
-        max_output_tokens: clamp_max_output_tokens(req.max_tokens),
         instructions,
         input,
         store: false,
@@ -343,17 +338,6 @@ pub fn translate_request(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn default_max_output_tokens() -> u32 {
-    DEFAULT_MAX_OUTPUT_TOKENS
-}
-
-fn clamp_max_output_tokens(requested: Option<u32>) -> u32 {
-    match requested {
-        Some(value) if value > 0 => value.min(DEFAULT_MAX_OUTPUT_TOKENS),
-        _ => DEFAULT_MAX_OUTPUT_TOKENS,
-    }
-}
 
 fn read_output_format(req: &MessagesRequest) -> Option<ResponsesTextFormat> {
     let output_config = req.extra.get("output_config")?.as_object()?;
@@ -724,18 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn max_output_tokens_defaults_to_32000() {
-        let req: MessagesRequest = serde_json::from_value(json!({
-            "model": "gpt-5.5",
-            "messages": [{"role":"user", "content":"hello"}]
-        }))
-        .unwrap();
-        let out = translate_request(&req, opts()).unwrap();
-        assert_eq!(out.max_output_tokens, 32_000);
-    }
-
-    #[test]
-    fn max_output_tokens_uses_request_limit() {
+    fn max_tokens_is_not_serialized_for_codex() {
         let req: MessagesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",
             "max_tokens": 4096,
@@ -743,19 +716,8 @@ mod tests {
         }))
         .unwrap();
         let out = translate_request(&req, opts()).unwrap();
-        assert_eq!(out.max_output_tokens, 4096);
-    }
-
-    #[test]
-    fn max_output_tokens_clamps_at_32000() {
-        let req: MessagesRequest = serde_json::from_value(json!({
-            "model": "gpt-5.5",
-            "max_tokens": 99999,
-            "messages": [{"role":"user", "content":"hello"}]
-        }))
-        .unwrap();
-        let out = translate_request(&req, opts()).unwrap();
-        assert_eq!(out.max_output_tokens, 32_000);
+        let value = serde_json::to_value(out).unwrap();
+        assert!(value.get("max_output_tokens").is_none());
     }
 
     #[test]
