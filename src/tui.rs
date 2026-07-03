@@ -68,9 +68,13 @@ pub fn run_monitor(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) => match key.code {
-                    KeyCode::Char('q') | KeyCode::Char('c')
-                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                    {
+                    KeyCode::Char('q') => {
+                        if let Some(shutdown) = app.shutdown.take() {
+                            let _ = shutdown.send(());
+                        }
+                        break;
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Some(shutdown) = app.shutdown.take() {
                             let _ = shutdown.send(());
                         }
