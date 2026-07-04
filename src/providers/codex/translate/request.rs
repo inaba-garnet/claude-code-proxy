@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -536,6 +538,7 @@ fn map_tool_choice(req: &MessagesRequest) -> Result<Option<ResponsesToolChoice>,
 
 fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
     let mut out: Vec<ResponsesInputItem> = Vec::new();
+    let mut read_tool_uses_with_offset = HashSet::new();
 
     for msg in &req.messages {
         let blocks = normalize_content(&msg.content, Value::Null);
@@ -570,6 +573,11 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
                             } else {
                                 body
                             };
+                            let output = maybe_append_read_offset_guidance(
+                                output,
+                                read_tool_uses_with_offset.contains(tool_use_id),
+                                is_error.unwrap_or(false),
+                            );
                             out.push(ResponsesInputItem::FunctionCallOutput {
                                 call_id: tool_use_id.clone(),
                                 output,
@@ -622,6 +630,9 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
                         }
                         ContentBlock::ToolUse { id, name, input } => {
                             flush_text(&mut out, &mut text_parts);
+                            if is_read_tool_use_with_offset(name, input) {
+                                read_tool_uses_with_offset.insert(id.clone());
+                            }
                             let args =
                                 serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
                             out.push(ResponsesInputItem::FunctionCall {
@@ -639,6 +650,46 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
     }
 
     out
+}
+
+fn is_read_tool_use_with_offset(name: &str, input: &Value) -> bool {
+    name == "Read" && input.get("offset").is_some()
+}
+
+fn maybe_append_read_offset_guidance(
+    output: String,
+    read_call_had_offset: bool,
+    is_error: bool,
+) -> String {
+    if !read_call_had_offset
+        || output.contains("Codex Read guidance:")
+        || !looks_like_read_offset_result(&output)
+        || (!is_error && !looks_like_read_offset_warning(&output))
+    {
+        return output;
+    }
+    format!("{output}\n\n{}", read_offset_guidance())
+}
+
+fn looks_like_read_offset_result(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("offset")
+        && (lower.contains("file has")
+            || lower.contains("out of range")
+            || (lower.contains("line") && lower.contains("requested")))
+}
+
+fn looks_like_read_offset_warning(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("warning") || lower.contains("system-reminder")
+}
+
+fn read_offset_guidance() -> &'static str {
+    "Codex Read guidance:\n\
+     - offset is a zero based line index in the displayed Read output.\n\
+     - The first displayed line has offset 0.\n\
+     - To continue reading, use previous offset plus returned line count.\n\
+     - Omit offset unless continuing a large file."
 }
 
 // ---------------------------------------------------------------------------
@@ -989,6 +1040,98 @@ mod tests {
         assert_eq!(out.input.len(), 1);
         if let ResponsesInputItem::FunctionCallOutput { call_id, .. } = &out.input[0] {
             assert_eq!(call_id, "tu_1");
+        } else {
+            panic!("expected FunctionCallOutput");
+        }
+    }
+
+    #[test]
+    fn translate_read_offset_error_adds_guidance() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [
+                {"role":"assistant", "content": [{
+                    "type": "tool_use",
+                    "id": "tu_1",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/a", "offset": 2952, "limit": 200}
+                }]},
+                {"role":"user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu_1",
+                    "is_error": true,
+                    "content": [{"type":"text", "text":"File has 331 lines, but offset 2952 was requested."}]
+                }]}
+            ]
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        assert_eq!(out.input.len(), 2);
+        if let ResponsesInputItem::FunctionCallOutput { output, .. } = &out.input[1] {
+            assert!(output.contains("[tool execution error]"));
+            assert!(output.contains("File has 331 lines"));
+            assert!(output.contains("Codex Read guidance:"));
+            assert!(output.contains("zero based line index"));
+        } else {
+            panic!("expected FunctionCallOutput");
+        }
+    }
+
+    #[test]
+    fn translate_read_unrelated_error_keeps_original_output() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [
+                {"role":"assistant", "content": [{
+                    "type": "tool_use",
+                    "id": "tu_1",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/a", "offset": 10, "limit": 20}
+                }]},
+                {"role":"user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu_1",
+                    "is_error": true,
+                    "content": [{"type":"text", "text":"File does not exist."}]
+                }]}
+            ]
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        assert_eq!(out.input.len(), 2);
+        if let ResponsesInputItem::FunctionCallOutput { output, .. } = &out.input[1] {
+            assert_eq!(output, "[tool execution error]\nFile does not exist.");
+        } else {
+            panic!("expected FunctionCallOutput");
+        }
+    }
+
+    #[test]
+    fn translate_read_success_with_offset_words_keeps_original_output() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [
+                {"role":"assistant", "content": [{
+                    "type": "tool_use",
+                    "id": "tu_1",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/a", "offset": 10, "limit": 20}
+                }]},
+                {"role":"user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu_1",
+                    "content": [{"type":"text", "text":"File has 331 lines, and the requested offset is shown in this fixture."}]
+                }]}
+            ]
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        assert_eq!(out.input.len(), 2);
+        if let ResponsesInputItem::FunctionCallOutput { output, .. } = &out.input[1] {
+            assert_eq!(
+                output,
+                "File has 331 lines, and the requested offset is shown in this fixture."
+            );
         } else {
             panic!("expected FunctionCallOutput");
         }
