@@ -152,6 +152,7 @@ async fn dispatch_request(
     if let Some(monitor) = state.monitor.as_ref() {
         monitor.request_started(&req_id, session_id.clone(), None, endpoint);
     }
+    let _request_guard = RequestMonitorGuard::new(state.monitor.clone(), req_id.clone());
     let now = current_millis();
     let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
         Ok(bytes) => bytes,
@@ -652,6 +653,25 @@ fn redact_error_key(value: Value) -> Value {
     match value {
         Value::String(value) => Value::String(format!("[redacted len={}]", value.len())),
         _ => Value::String("[redacted]".to_string()),
+    }
+}
+
+struct RequestMonitorGuard {
+    monitor: Option<MonitorHandle>,
+    req_id: String,
+}
+
+impl RequestMonitorGuard {
+    fn new(monitor: Option<MonitorHandle>, req_id: String) -> Self {
+        Self { monitor, req_id }
+    }
+}
+
+impl Drop for RequestMonitorGuard {
+    fn drop(&mut self) {
+        if let Some(monitor) = self.monitor.as_ref() {
+            monitor.request_abandoned(&self.req_id, "Request future ended before completion");
+        }
     }
 }
 

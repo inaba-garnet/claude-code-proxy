@@ -88,6 +88,10 @@ pub enum MonitorEvent {
         http_status: Option<u16>,
         error: String,
     },
+    RequestAbandoned {
+        request_id: String,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +369,13 @@ impl MonitorHandle {
             error: error.into(),
         });
     }
+
+    pub fn request_abandoned(&self, request_id: impl Into<String>, error: impl Into<String>) {
+        self.publish(MonitorEvent::RequestAbandoned {
+            request_id: request_id.into(),
+            error: error.into(),
+        });
+    }
 }
 
 impl MonitorStore {
@@ -472,6 +483,37 @@ impl MonitorStore {
                     Some(error),
                 );
             }
+            MonitorEvent::RequestAbandoned { request_id, error } => {
+                self.finish_active(
+                    &request_id,
+                    RequestStatus::Failed,
+                    None,
+                    None,
+                    None,
+                    Some(error),
+                );
+            }
+        }
+    }
+
+    fn finish_active(
+        &mut self,
+        request_id: &str,
+        status: RequestStatus,
+        http_status: Option<u16>,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        error: Option<String>,
+    ) {
+        if self.active.contains_key(request_id) {
+            self.finish(
+                request_id,
+                status,
+                http_status,
+                input_tokens,
+                output_tokens,
+                error,
+            );
         }
     }
 
@@ -731,6 +773,32 @@ mod tests {
         assert_eq!(state.recent[0].status, RequestStatus::Failed);
         assert_eq!(state.recent[0].http_status, Some(400));
         assert_eq!(state.recent[0].error.as_deref(), Some("Unknown model"));
+    }
+
+    #[test]
+    fn abandoned_requests_leave_active_once() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("r1", None, None, EndpointKind::Messages);
+        monitor.request_abandoned("r1", "request dropped");
+        monitor.request_abandoned("r1", "request dropped again");
+        let state = monitor.snapshot();
+        assert!(state.active.is_empty());
+        assert_eq!(state.recent.len(), 1);
+        assert_eq!(state.recent[0].status, RequestStatus::Failed);
+        assert_eq!(state.recent[0].http_status, None);
+        assert_eq!(state.recent[0].error.as_deref(), Some("request dropped"));
+    }
+
+    #[test]
+    fn completed_requests_ignore_late_abandonment() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("r1", None, None, EndpointKind::Messages);
+        monitor.request_completed("r1", 200, None, None);
+        monitor.request_abandoned("r1", "request dropped");
+        let state = monitor.snapshot();
+        assert!(state.active.is_empty());
+        assert_eq!(state.recent.len(), 1);
+        assert_eq!(state.recent[0].status, RequestStatus::Completed);
     }
 
     #[test]
