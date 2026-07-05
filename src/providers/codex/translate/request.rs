@@ -446,14 +446,7 @@ fn codex_tool_description(name: &str, description: Option<String>) -> Option<Str
     }
 
     let base = description.unwrap_or_else(|| "Reads a file from the local filesystem.".to_string());
-    Some(format!(
-        "{base}\n\nCodex guidance:\n\
-         - `offset` is a zero based line index in the displayed Read output.\n\
-         - The first displayed line has offset 0.\n\
-         - To continue reading, use previous offset plus returned line count.\n\
-         - Omit `offset` and `limit` unless continuing a large file.\n\
-         - Use shell tools for grep style line numbers when exact slices matter."
-    ))
+    Some(format!("{base}\n\n{}", read_offset_guidance()))
 }
 
 fn codex_tool_parameters(name: &str, mut parameters: Value) -> Value {
@@ -472,7 +465,7 @@ fn codex_tool_parameters(name: &str, mut parameters: Value) -> Value {
         offset.insert(
             "description".to_string(),
             Value::String(
-                "Zero based line index to start reading from. The first displayed line is 0. Use previous offset plus returned line count when continuing a prior Read.".to_string(),
+                "Optional continuation index. Use only after a prior Read of the same file returned content and more lines are needed. Compute as prior offset plus returned line count. Displayed line numbers, grep line numbers, byte counts, token counts, file sizes, and guessed positions are invalid offsets. Omit when unsure.".to_string(),
             ),
         );
     }
@@ -481,7 +474,7 @@ fn codex_tool_parameters(name: &str, mut parameters: Value) -> Value {
         limit.insert(
             "description".to_string(),
             Value::String(
-                "Number of lines to read. Omit unless the file is too large to read in one request."
+                "Optional number of lines to read. Omit when opening a file. Use with offset only when continuing a large file."
                     .to_string(),
             ),
         );
@@ -686,10 +679,11 @@ fn looks_like_read_offset_warning(output: &str) -> bool {
 
 fn read_offset_guidance() -> &'static str {
     "Codex Read guidance:\n\
-     - offset is a zero based line index in the displayed Read output.\n\
-     - The first displayed line has offset 0.\n\
-     - To continue reading, use previous offset plus returned line count.\n\
-     - Omit offset unless continuing a large file."
+     - offset is an optional zero based continuation index, not a line number lookup.\n\
+     - Use offset only after a prior Read of the same file returned content and more lines are needed.\n\
+     - Compute offset as prior offset plus the number of lines returned by that prior Read.\n\
+     - Displayed line numbers, grep line numbers, byte counts, token counts, file sizes, and guessed positions are invalid offsets.\n\
+     - Omit offset and limit when opening a file or when unsure."
 }
 
 // ---------------------------------------------------------------------------
@@ -825,8 +819,9 @@ mod tests {
             panic!("expected function tool");
         };
         let description = tool.description.as_deref().unwrap();
-        assert!(description.contains("Codex guidance"));
-        assert!(description.contains("zero based line index"));
+        assert!(description.contains("Codex Read guidance"));
+        assert!(description.contains("zero based continuation index"));
+        assert!(description.contains("guessed positions are invalid offsets"));
 
         let props = tool
             .parameters
@@ -839,7 +834,7 @@ mod tests {
                 .and_then(|v| v.get("description"))
                 .and_then(Value::as_str),
             Some(
-                "Zero based line index to start reading from. The first displayed line is 0. Use previous offset plus returned line count when continuing a prior Read."
+                "Optional continuation index. Use only after a prior Read of the same file returned content and more lines are needed. Compute as prior offset plus returned line count. Displayed line numbers, grep line numbers, byte counts, token counts, file sizes, and guessed positions are invalid offsets. Omit when unsure."
             )
         );
         assert_eq!(
@@ -848,7 +843,7 @@ mod tests {
                 .and_then(|v| v.get("description"))
                 .and_then(Value::as_str),
             Some(
-                "Number of lines to read. Omit unless the file is too large to read in one request."
+                "Optional number of lines to read. Omit when opening a file. Use with offset only when continuing a large file."
             )
         );
     }
@@ -1071,7 +1066,7 @@ mod tests {
             assert!(output.contains("[tool execution error]"));
             assert!(output.contains("File has 331 lines"));
             assert!(output.contains("Codex Read guidance:"));
-            assert!(output.contains("zero based line index"));
+            assert!(output.contains("zero based continuation index"));
         } else {
             panic!("expected FunctionCallOutput");
         }
