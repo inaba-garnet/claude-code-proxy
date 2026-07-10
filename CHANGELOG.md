@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.10 (2026-07-10)
+
+- Claude Code requests using Opus 4.8, Sonnet 5, and Fable 5 model names can
+  route through Codex
+
 ## v0.1.9 (2026-07-10)
 
 - Claude model aliases use the matching GPT-5.6 tier through Codex: Haiku uses
