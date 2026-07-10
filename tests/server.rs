@@ -228,7 +228,7 @@ async fn monitor_records_successful_request_events() {
                 .uri("/v1/messages/count_tokens")
                 .header("content-type", "application/json")
                 .body(body_string(
-                    r#"{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}]}"#,
+                    r#"{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"output_config":{"effort":"high"}}"#,
                 ))
                 .unwrap(),
         )
@@ -243,6 +243,7 @@ async fn monitor_records_successful_request_events() {
     assert_eq!(state.recent[0].http_status, Some(200));
     assert_eq!(state.recent[0].provider.as_deref(), Some("codex"));
     assert_eq!(state.recent[0].model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(state.recent[0].effort.as_deref(), Some("high"));
     assert!(state.recent[0].input_tokens.is_some());
 }
 

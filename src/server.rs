@@ -353,6 +353,10 @@ async fn dispatch_request(
         }
     };
 
+    let effort = crate::providers::translate_shared::read_effort(&body)
+        .ok()
+        .flatten()
+        .map(str::to_string);
     let current = session::record_session_request(
         session_id.as_deref(),
         session_state.as_ref(),
@@ -364,7 +368,7 @@ async fn dispatch_request(
         if let Some(current) = current.as_ref() {
             monitor.request_started(&req_id, session_id.clone(), Some(current.seq), endpoint);
         }
-        monitor.provider_selected(&req_id, provider.name(), &normalized_model);
+        monitor.provider_selected(&req_id, provider.name(), &normalized_model, effort);
     }
 
     let traffic = create_traffic_capture(TrafficCaptureOptions {

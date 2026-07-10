@@ -57,6 +57,7 @@ pub enum MonitorEvent {
         request_id: String,
         provider: String,
         model: String,
+        effort: Option<String>,
     },
     ModelResolved {
         request_id: String,
@@ -105,6 +106,7 @@ pub struct ActiveRequest {
     pub session_seq: Option<u64>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub endpoint: EndpointKind,
     pub started_at: SystemTime,
     started_instant: Instant,
@@ -139,6 +141,7 @@ pub struct CompletedRequest {
     pub session_seq: Option<u64>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub endpoint: EndpointKind,
     pub started_at: SystemTime,
     pub finished_at: SystemTime,
@@ -202,6 +205,7 @@ pub struct SessionSummary {
     pub failure_count: usize,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub last_seen: SystemTime,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -295,11 +299,13 @@ impl MonitorHandle {
         request_id: impl Into<String>,
         provider: impl Into<String>,
         model: impl Into<String>,
+        effort: Option<String>,
     ) {
         self.publish(MonitorEvent::ProviderSelected {
             request_id: request_id.into(),
             provider: provider.into(),
             model: model.into(),
+            effort,
         });
     }
 
@@ -406,6 +412,7 @@ impl MonitorStore {
                         session_seq,
                         provider: None,
                         model: None,
+                        effort: None,
                         endpoint,
                         started_at: SystemTime::now(),
                         started_instant: Instant::now(),
@@ -423,10 +430,12 @@ impl MonitorStore {
                 request_id,
                 provider,
                 model,
+                effort,
             } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
                     active.provider = Some(provider);
                     active.model = Some(model);
+                    active.effort = effort;
                     active.status = RequestStatus::ProviderSelected;
                 }
             }
@@ -555,6 +564,7 @@ impl MonitorStore {
                 session_seq: None,
                 provider: None,
                 model: None,
+                effort: None,
                 endpoint: EndpointKind::Messages,
                 started_at: SystemTime::now(),
                 started_instant: Instant::now(),
@@ -572,6 +582,7 @@ impl MonitorStore {
             session_seq: active.session_seq,
             provider: active.provider,
             model: active.model,
+            effort: active.effort,
             endpoint: active.endpoint,
             started_at: active.started_at,
             finished_at: SystemTime::now(),
@@ -619,6 +630,7 @@ fn session_summaries(
                 failure_count: 0,
                 provider: None,
                 model: None,
+                effort: None,
                 last_seen: request.finished_at,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -631,6 +643,7 @@ fn session_summaries(
         }
         entry.provider = request.provider.clone().or(entry.provider.clone());
         entry.model = request.model.clone().or(entry.model.clone());
+        entry.effort = request.effort.clone().or(entry.effort.clone());
         entry.last_seen = max_system_time(entry.last_seen, request.finished_at);
         entry.input_tokens = entry
             .input_tokens
@@ -652,6 +665,7 @@ fn session_summaries(
                 failure_count: 0,
                 provider: None,
                 model: None,
+                effort: None,
                 last_seen: request.started_at,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -662,6 +676,7 @@ fn session_summaries(
         entry.request_count += 1;
         entry.provider = request.provider.clone().or(entry.provider.clone());
         entry.model = request.model.clone().or(entry.model.clone());
+        entry.effort = request.effort.clone().or(entry.effort.clone());
         entry.last_seen = max_system_time(entry.last_seen, request.started_at);
         entry.input_tokens = entry
             .input_tokens
@@ -800,12 +815,13 @@ mod tests {
     fn completed_requests_leave_active_and_enter_recent() {
         let monitor = MonitorHandle::new(10);
         monitor.request_started("r1", None, None, EndpointKind::Messages);
-        monitor.provider_selected("r1", "codex", "gpt-5.5");
+        monitor.provider_selected("r1", "codex", "gpt-5.5", Some("high".to_string()));
         monitor.request_completed("r1", 200, Some(10), Some(20));
         let state = monitor.snapshot();
         assert!(state.active.is_empty());
         assert_eq!(state.recent.len(), 1);
         assert_eq!(state.recent[0].provider.as_deref(), Some("codex"));
+        assert_eq!(state.recent[0].effort.as_deref(), Some("high"));
         assert_eq!(state.recent[0].output_tokens, Some(20));
     }
 
@@ -900,7 +916,7 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
             Some(1),
             EndpointKind::Messages,
         );
-        monitor.provider_selected("r1", "codex", "gpt-5.5");
+        monitor.provider_selected("r1", "codex", "gpt-5.5", None);
         monitor.request_completed("r1", 200, Some(10), Some(20));
         monitor.request_started(
             "r2",
@@ -908,12 +924,13 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
             Some(2),
             EndpointKind::Messages,
         );
-        monitor.provider_selected("r2", "codex", "gpt-5.5");
+        monitor.provider_selected("r2", "codex", "gpt-5.5", Some("xhigh".to_string()));
         let state = monitor.snapshot();
         assert_eq!(state.sessions.len(), 1);
         assert_eq!(state.sessions[0].label(), "s1");
         assert_eq!(state.sessions[0].request_count, 2);
         assert_eq!(state.sessions[0].active_count, 1);
+        assert_eq!(state.sessions[0].effort.as_deref(), Some("xhigh"));
         assert_eq!(state.sessions[0].output_tokens, 20);
     }
 
