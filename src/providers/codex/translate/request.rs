@@ -370,17 +370,21 @@ pub fn translate_request(
     let effort = read_effort(req)?;
     let codex_effort = to_codex_effort(effort);
     let resolved_effort = resolve_effort(codex_effort)?;
-    if let Some(ref eff) = resolved_effort {
-        let summary = if reasoning_summary_requested(config::codex_reasoning_summary().as_deref()) {
+    if resolved_effort.is_some() || opts.use_responses_lite {
+        let summary = if resolved_effort.is_some()
+            && reasoning_summary_requested(config::codex_reasoning_summary().as_deref())
+        {
             Some("auto".to_string())
         } else {
             None
         };
         out.reasoning = Some(ResponsesReasoning {
-            effort: Some(eff.clone()),
+            effort: resolved_effort.clone(),
             summary,
             context: opts.use_responses_lite.then_some("all_turns".to_string()),
         });
+    }
+    if resolved_effort.is_some() {
         out.include = Some(vec!["reasoning.encrypted_content".to_string()]);
     }
 
@@ -1336,6 +1340,29 @@ mod tests {
         } else {
             panic!("expected developer message");
         }
+    }
+
+    #[test]
+    fn responses_lite_without_effort_uses_all_turns_context() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{"role":"user", "content":"hello"}]
+        }))
+        .unwrap();
+        let out = translate_request(
+            &req,
+            TranslateOptions {
+                model: "gpt-5.6-luna".to_string(),
+                use_responses_lite: true,
+                ..opts()
+            },
+        )
+        .unwrap();
+        let reasoning = out.reasoning.unwrap();
+        assert!(reasoning.effort.is_none());
+        assert!(reasoning.summary.is_none());
+        assert_eq!(reasoning.context.as_deref(), Some("all_turns"));
+        assert!(out.include.is_none());
     }
 
     #[test]
