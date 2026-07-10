@@ -280,6 +280,25 @@ fn text_cell(value: impl Into<String>) -> Cell<'static> {
     Cell::from(Span::styled(value.into(), Style::default().fg(DIM_WHITE)))
 }
 
+fn model_cell(value: Option<&str>) -> Cell<'static> {
+    text_cell(ellipsize(value.unwrap_or("-"), 16))
+}
+
+fn ellipsize(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+
+    value
+        .chars()
+        .take(width.saturating_sub(1))
+        .chain(std::iter::once('…'))
+        .collect()
+}
+
 fn number_cell(value: impl Into<String>) -> Cell<'static> {
     Cell::from(
         Line::from(Span::styled(value.into(), Style::default().fg(DIM_WHITE)))
@@ -394,7 +413,7 @@ fn render_sessions(
             number_cell(session.request_count.to_string()),
             number_cell(session.failure_count.to_string()),
             provider_cell(session.provider.as_deref()),
-            text_cell(session.model.as_deref().unwrap_or("-")),
+            model_cell(session.model.as_deref()),
             text_cell(session.effort.as_deref().unwrap_or("-")),
             number_cell(compact_tokens(session.input_tokens)),
             number_cell(compact_tokens(session.output_tokens)),
@@ -460,7 +479,7 @@ fn render_active(
         Row::new(vec![
             muted_cell(format_system_time(request.started_at)),
             provider_cell(request.provider.as_deref()),
-            text_cell(request.model.as_deref().unwrap_or("-")),
+            model_cell(request.model.as_deref()),
             text_cell(request.effort.as_deref().unwrap_or("-")),
             muted_cell(request.endpoint.label()),
             Cell::from(Span::styled(status, status_style(request.status.label()))),
@@ -508,7 +527,7 @@ fn render_recent(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
                 http_status_style(request.http_status),
             )),
             provider_cell(request.provider.as_deref()),
-            text_cell(request.model.as_deref().unwrap_or("-")),
+            model_cell(request.model.as_deref()),
             text_cell(request.effort.as_deref().unwrap_or("-")),
             number_cell(format_duration(request.latency)),
             rate_cell(request.rate().label()),
@@ -572,7 +591,7 @@ fn render_events(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
                 muted_cell(format_system_time(request.finished_at)),
                 Cell::from(Span::styled(status, http_status_style(request.http_status))),
                 provider_cell(request.provider.as_deref()),
-                text_cell(request.model.as_deref().unwrap_or("-")),
+                model_cell(request.model.as_deref()),
                 detail_cell(message),
             ])
             .style(Style::default().bg(PANEL_BG))
@@ -832,6 +851,13 @@ fn format_system_time(time: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ellipsize_marks_truncated_values() {
+        assert_eq!(ellipsize("claude-sonnet-4-6", 16), "claude-sonnet-4…");
+        assert_eq!(ellipsize("gpt-5.6-sol", 16), "gpt-5.6-sol");
+        assert_eq!(ellipsize("anything", 0), "");
+    }
 
     #[test]
     fn clamp_selection_caps_to_available_sessions() {
