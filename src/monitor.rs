@@ -471,6 +471,20 @@ impl MonitorStore {
                     active.stream_chunks = active.stream_chunks.saturating_add(chunks);
                     active.input_tokens = input_tokens.or(active.input_tokens);
                     active.output_tokens = output_tokens.or(active.output_tokens);
+                } else if let Some(completed) = self
+                    .recent
+                    .iter_mut()
+                    .find(|request| request.request_id == request_id)
+                {
+                    completed.streamed_bytes = completed.streamed_bytes.saturating_add(bytes);
+                    completed.stream_chunks = completed.stream_chunks.saturating_add(chunks);
+                    completed.input_tokens = input_tokens.or(completed.input_tokens);
+                    completed.output_tokens = output_tokens.or(completed.output_tokens);
+                    completed.finished_at = SystemTime::now();
+                    completed.latency = completed
+                        .finished_at
+                        .duration_since(completed.started_at)
+                        .unwrap_or(completed.latency);
                 }
             }
             MonitorEvent::UsageUpdated {
@@ -481,6 +495,13 @@ impl MonitorStore {
                 if let Some(active) = self.active.get_mut(&request_id) {
                     active.input_tokens = input_tokens.or(active.input_tokens);
                     active.output_tokens = output_tokens.or(active.output_tokens);
+                } else if let Some(completed) = self
+                    .recent
+                    .iter_mut()
+                    .find(|request| request.request_id == request_id)
+                {
+                    completed.input_tokens = input_tokens.or(completed.input_tokens);
+                    completed.output_tokens = output_tokens.or(completed.output_tokens);
                 }
             }
             MonitorEvent::RequestCompleted {
@@ -809,6 +830,26 @@ mod tests {
 
         let state = monitor.snapshot();
         assert_eq!(state.active[0].model.as_deref(), Some("gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn late_stream_usage_updates_completed_request() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("r1", None, None, EndpointKind::Messages);
+        monitor.stream_progress("r1", 100, 1, Some(0), Some(0));
+        monitor.request_completed("r1", 200, None, None);
+        monitor.stream_progress("r1", 50, 1, Some(1_225), Some(141));
+
+        let state = monitor.snapshot();
+        assert!(state.active.is_empty());
+        assert_eq!(state.recent[0].streamed_bytes, 150);
+        assert_eq!(state.recent[0].stream_chunks, 2);
+        assert_eq!(state.recent[0].input_tokens, Some(1_225));
+        assert_eq!(state.recent[0].output_tokens, Some(141));
+        assert!(matches!(
+            state.recent[0].rate(),
+            Throughput::TokensPerSecond(_)
+        ));
     }
 
     #[test]
