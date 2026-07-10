@@ -609,13 +609,13 @@ fn render_recent(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
     let widths = [
         Constraint::Length(8),
         Constraint::Length(6),
-        Constraint::Length(10),
-        Constraint::Min(16),
+        Constraint::Length(8),
+        Constraint::Fill(2),
         Constraint::Length(7),
-        Constraint::Length(9),
+        Constraint::Length(8),
         Constraint::Length(12),
-        Constraint::Length(9),
-        Constraint::Length(9),
+        Constraint::Length(7),
+        Constraint::Length(7),
         Constraint::Fill(1),
     ];
     let model_width = table_column_width(area, &widths, 3);
@@ -1034,17 +1034,19 @@ mod tests {
         let widths = [
             Constraint::Length(8),
             Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Min(16),
+            Constraint::Length(8),
+            Constraint::Fill(2),
             Constraint::Length(7),
-            Constraint::Length(9),
+            Constraint::Length(8),
             Constraint::Length(12),
-            Constraint::Length(9),
-            Constraint::Length(9),
+            Constraint::Length(7),
+            Constraint::Length(7),
             Constraint::Fill(1),
         ];
 
-        assert_eq!(table_column_width(Rect::new(0, 0, 120, 10), &widths, 6), 12);
+        assert_eq!(table_column_width(Rect::new(0, 0, 90, 10), &widths, 6), 12);
+        assert_eq!(table_column_width(Rect::new(0, 0, 90, 10), &widths, 7), 7);
+        assert_eq!(table_column_width(Rect::new(0, 0, 90, 10), &widths, 8), 7);
     }
 
     #[test]
