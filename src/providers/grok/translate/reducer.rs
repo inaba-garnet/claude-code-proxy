@@ -18,10 +18,18 @@ pub enum ReducerEvent {
     ToolStart(usize, String, String),
     ToolDelta(usize, String),
     ToolStop(usize),
+    WebSearch {
+        index: usize,
+        result_index: usize,
+        id: String,
+        query: String,
+    },
+    Citation(usize, Value),
     Finish {
         stop_reason: String,
         input_tokens: u64,
         output_tokens: u64,
+        web_search_requests: u64,
     },
 }
 
@@ -33,6 +41,7 @@ pub struct Reducer {
     item_calls: HashMap<String, String>,
     tool_args: HashMap<String, String>,
     completed_arguments: HashMap<String, bool>,
+    web_search_requests: u64,
     saw_tool: bool,
     completed: bool,
 }
@@ -61,7 +70,24 @@ impl Reducer {
                 ),
             "response.custom_tool_call_input.delta"
             | "response.custom_tool_call_input.done"
-            | "response.output_text.annotation.added" => Ok(vec![]),
+            | "response.web_search_call.in_progress"
+            | "response.web_search_call.searching"
+            | "response.web_search_call.completed" => Ok(vec![]),
+            "response.output_text.annotation.added" => {
+                let Some((kind, index)) = self.active.as_ref() else {
+                    return Ok(vec![]);
+                };
+                let Some(annotation) = value.get("annotation") else {
+                    return Ok(vec![]);
+                };
+                if kind == "text"
+                    && annotation.get("type").and_then(Value::as_str) == Some("url_citation")
+                {
+                    Ok(vec![ReducerEvent::Citation(*index, annotation.clone())])
+                } else {
+                    Ok(vec![])
+                }
+            }
             "response.output_text.delta" => self.delta(
                 "text",
                 value
@@ -181,22 +207,47 @@ impl Reducer {
                     .get("item")
                     .and_then(Value::as_object)
                     .ok_or_else(|| anyhow::anyhow!("completed output item is invalid"))?;
-                if item.get("type").and_then(Value::as_str) != Some("function_call") {
-                    return Ok(vec![]);
+                match item.get("type").and_then(Value::as_str) {
+                    Some("web_search_call") => {
+                        let id = item
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            .ok_or_else(|| anyhow::anyhow!("completed web search lacks id"))?;
+                        let query = item
+                            .get("action")
+                            .and_then(|action| action.get("query"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let mut out = self.close_active()?;
+                        let index = self.next_index;
+                        let result_index = index + 1;
+                        self.next_index += 2;
+                        self.web_search_requests += 1;
+                        out.push(ReducerEvent::WebSearch {
+                            index,
+                            result_index,
+                            id: format!("srvtoolu_{id}"),
+                            query: query.into(),
+                        });
+                        Ok(out)
+                    }
+                    Some("function_call") => {
+                        let id = item.get("call_id").and_then(Value::as_str).ok_or_else(|| {
+                            anyhow::anyhow!("completed function call lacks call id")
+                        })?;
+                        let (index, _) = self
+                            .calls
+                            .remove(id)
+                            .ok_or_else(|| anyhow::anyhow!("completed function call is unknown"))?;
+                        let args = self.tool_args.remove(id).unwrap_or_default();
+                        self.completed_arguments.remove(id);
+                        serde_json::from_str::<Value>(&args)
+                            .map_err(|_| anyhow::anyhow!("function arguments are incomplete"))?;
+                        Ok(vec![ReducerEvent::ToolStop(index)])
+                    }
+                    _ => Ok(vec![]),
                 }
-                let id = item
-                    .get("call_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("completed function call lacks call id"))?;
-                let (index, _) = self
-                    .calls
-                    .remove(id)
-                    .ok_or_else(|| anyhow::anyhow!("completed function call is unknown"))?;
-                let args = self.tool_args.remove(id).unwrap_or_default();
-                self.completed_arguments.remove(id);
-                serde_json::from_str::<Value>(&args)
-                    .map_err(|_| anyhow::anyhow!("function arguments are incomplete"))?;
-                Ok(vec![ReducerEvent::ToolStop(index)])
             }
             "response.completed" => {
                 if !self.calls.is_empty() {
@@ -223,6 +274,7 @@ impl Reducer {
                     stop_reason: stop.into(),
                     input_tokens: input,
                     output_tokens: output,
+                    web_search_requests: self.web_search_requests,
                 });
                 Ok(out)
             }

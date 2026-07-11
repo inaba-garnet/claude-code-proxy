@@ -78,18 +78,18 @@ pub fn translate_request(
     let mut tools = parse_tools(req.extra.get("tools"))?;
     let hosted_search = tools
         .as_ref()
-        .is_some_and(|tools| tools.iter().any(|tool| tool.kind == "x_search"));
+        .is_some_and(|tools| tools.iter().any(|tool| tool.kind == "web_search"));
     let force_hosted_search = hosted_search && requests_web_search(req);
     if force_hosted_search {
         tools = Some(vec![GrokTool {
-            kind: "x_search".into(),
+            kind: "web_search".into(),
             name: None,
             description: None,
             parameters: None,
         }]);
     }
     if hosted_search {
-        let guidance = "For web searches, use the hosted x_search tool. Do not use shell commands, HTTP clients, or local tools to search the web.";
+        let guidance = "For general web searches, use the hosted web_search tool. Do not use shell commands, HTTP clients, or local tools to search the web.";
         instructions = Some(match instructions {
             Some(existing) if !existing.is_empty() => format!("{existing}\n\n{guidance}"),
             _ => guidance.into(),
@@ -227,7 +227,7 @@ fn parse_tools(value: Option<&Value>) -> anyhow::Result<Option<Vec<GrokTool>>> {
         }
         if name == "WebSearch" {
             out.push(GrokTool {
-                kind: "x_search".into(),
+                kind: "web_search".into(),
                 name: None,
                 description: None,
                 parameters: None,
@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(value["tool_choice"]["type"], "function");
     }
     #[test]
-    fn grok_translation_maps_claude_web_search_to_x_search() {
+    fn grok_translation_maps_claude_web_search_to_hosted_web_search() {
         let request: MessagesRequest = serde_json::from_value(serde_json::json!({
             "model":"grok-4.5",
             "messages":[{"role":"user","content":"search online for the project"}],
@@ -486,13 +486,13 @@ mod tests {
             serde_json::to_value(translate_request(&request, "grok-4.5".into()).unwrap()).unwrap();
         assert_eq!(
             translated["tools"],
-            serde_json::json!([{"type":"x_search"}])
+            serde_json::json!([{"type":"web_search"}])
         );
         assert!(
             translated["instructions"]
                 .as_str()
                 .unwrap()
-                .contains("use the hosted x_search tool")
+                .contains("use the hosted web_search tool")
         );
         assert_eq!(translated["tool_choice"], "required");
     }

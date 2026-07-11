@@ -152,6 +152,7 @@ impl StreamTranslator {
                     ReducerEvent::ThinkingStart(_)
                         | ReducerEvent::TextStart(_)
                         | ReducerEvent::ToolStart(_, _, _)
+                        | ReducerEvent::WebSearch { .. }
                         | ReducerEvent::Finish { .. }
                 )
             {
@@ -240,15 +241,61 @@ fn render(out: &mut Vec<u8>, event: ReducerEvent) {
             "content_block_delta",
             serde_json::json!({"type":"content_block_delta","index":i,"delta":{"type":"input_json_delta","partial_json":t}}),
         ),
+        ReducerEvent::WebSearch {
+            index,
+            result_index,
+            id,
+            query,
+        } => {
+            emit(
+                out,
+                "content_block_start",
+                serde_json::json!({"type":"content_block_start","index":index,"content_block":{"type":"server_tool_use","id":id,"name":"web_search","input":{}}}),
+            );
+            emit(
+                out,
+                "content_block_delta",
+                serde_json::json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":serde_json::json!({"query":query}).to_string()}}),
+            );
+            emit(
+                out,
+                "content_block_stop",
+                serde_json::json!({"type":"content_block_stop","index":index}),
+            );
+            emit(
+                out,
+                "content_block_start",
+                serde_json::json!({"type":"content_block_start","index":result_index,"content_block":{"type":"web_search_tool_result","tool_use_id":id,"content":[]}}),
+            );
+            emit(
+                out,
+                "content_block_stop",
+                serde_json::json!({"type":"content_block_stop","index":result_index}),
+            );
+        }
+        ReducerEvent::Citation(i, annotation) => {
+            let citation = serde_json::json!({
+                "type":"web_search_result_location",
+                "url":annotation.get("url").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                "title":annotation.get("title").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                "cited_text":annotation.get("text").and_then(serde_json::Value::as_str).unwrap_or_default()
+            });
+            emit(
+                out,
+                "content_block_delta",
+                serde_json::json!({"type":"content_block_delta","index":i,"delta":{"type":"citations_delta","citation":citation}}),
+            );
+        }
         ReducerEvent::Finish {
             stop_reason,
             output_tokens,
+            web_search_requests,
             ..
         } => {
             emit(
                 out,
                 "message_delta",
-                serde_json::json!({"type":"message_delta","delta":{"stop_reason":stop_reason,"stop_sequence":null},"usage":{"output_tokens":output_tokens}}),
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":stop_reason,"stop_sequence":null},"usage":{"output_tokens":output_tokens,"server_tool_use":{"web_search_requests":web_search_requests}}}),
             );
             emit(
                 out,
@@ -296,6 +343,18 @@ mod tests {
         assert!(decoder.push(b"data: ").is_ok());
         assert!(decoder.push(&vec![b'x'; exact.len() + 1]).is_ok());
         assert!(decoder.push(b"\n").is_err());
+    }
+
+    #[test]
+    fn stream_translates_hosted_web_search_and_citations() {
+        let input = b"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\"}}\n\ndata: {\"type\":\"response.web_search_call.in_progress\",\"item_id\":\"ws_1\"}\n\ndata: {\"type\":\"response.web_search_call.searching\",\"item_id\":\"ws_1\"}\n\ndata: {\"type\":\"response.web_search_call.completed\",\"item_id\":\"ws_1\"}\n\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"action\":{\"query\":\"rust news\"}}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Result\"}\n\ndata: {\"type\":\"response.output_text.annotation.added\",\"annotation\":{\"type\":\"url_citation\",\"url\":\"https://example.com\",\"title\":\"Example\"}}\n\ndata: {\"type\":\"response.output_text.done\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n";
+        let output =
+            String::from_utf8(translate_stream_bytes(input, "msg_1", "grok-4.5").unwrap()).unwrap();
+        assert!(output.contains("server_tool_use"));
+        assert!(output.contains("web_search_tool_result"));
+        assert!(output.contains("citations_delta"));
+        assert!(output.contains("https://example.com"));
+        assert!(output.contains("\"web_search_requests\":1"));
     }
 
     #[test]

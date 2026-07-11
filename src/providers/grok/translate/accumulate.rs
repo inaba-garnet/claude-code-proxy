@@ -50,6 +50,7 @@ pub fn accumulate_response_with_traffic(
     let mut stop = "end_turn".to_string();
     let mut input = 0;
     let mut output = 0;
+    let mut web_search_requests = 0;
     let reduced = match reduce_upstream_bytes(upstream) {
         Ok(events) => events,
         Err(error) => {
@@ -127,19 +128,50 @@ pub fn accumulate_response_with_traffic(
                     block.as_object_mut().unwrap().remove("_args");
                 }
             }
+            ReducerEvent::WebSearch {
+                index,
+                result_index,
+                id,
+                query,
+            } => {
+                block_positions.insert(index, blocks.len());
+                blocks.push(serde_json::json!({"type":"server_tool_use","id":id,"name":"web_search","input":{"query":query}}));
+                block_positions.insert(result_index, blocks.len());
+                blocks.push(serde_json::json!({"type":"web_search_tool_result","tool_use_id":id,"content":[]}));
+            }
+            ReducerEvent::Citation(index, annotation) => {
+                if let Some(block) = block_positions
+                    .get(&index)
+                    .and_then(|position| blocks.get_mut(*position))
+                {
+                    let citations = block
+                        .as_object_mut()
+                        .unwrap()
+                        .entry("citations")
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    citations.as_array_mut().unwrap().push(serde_json::json!({
+                        "type":"web_search_result_location",
+                        "url":annotation.get("url").and_then(Value::as_str).unwrap_or_default(),
+                        "title":annotation.get("title").and_then(Value::as_str).unwrap_or_default(),
+                        "cited_text":annotation.get("text").and_then(Value::as_str).unwrap_or_default()
+                    }));
+                }
+            }
             ReducerEvent::Finish {
                 stop_reason,
                 input_tokens,
                 output_tokens,
+                web_search_requests: requests,
             } => {
                 stop = stop_reason;
                 input = input_tokens;
                 output = output_tokens;
+                web_search_requests = requests;
             }
             _ => {}
         }
     }
-    let response = serde_json::json!({"id":message_id,"type":"message","role":"assistant","model":model,"content":blocks,"stop_reason":stop,"stop_sequence":null,"usage":{"input_tokens":input,"output_tokens":output}});
+    let response = serde_json::json!({"id":message_id,"type":"message","role":"assistant","model":model,"content":blocks,"stop_reason":stop,"stop_sequence":null,"usage":{"input_tokens":input,"output_tokens":output,"server_tool_use":{"web_search_requests":web_search_requests}}});
     if let Some(mut capture) = capture {
         capture.downstream_event("response", response.clone());
         finish_capture(Some(capture), traffic, "completed");
