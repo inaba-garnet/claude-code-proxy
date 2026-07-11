@@ -88,7 +88,7 @@ const RECENT_INDICATOR_TABLE_HEADERS: [(&str, Alignment); 10] = [
     ("Rate", Alignment::Right),
     ("In", Alignment::Right),
     ("Out", Alignment::Right),
-    ("D", Alignment::Left),
+    ("Err", Alignment::Left),
 ];
 
 const RECENT_DETAIL_WIDTH: u16 = 132;
@@ -579,7 +579,7 @@ fn detail_cell(value: &str) -> Cell<'static> {
     }
 }
 
-fn detail_indicator(request: &CompletedRequest) -> &'static str {
+fn error_indicator(request: &CompletedRequest) -> &'static str {
     if request.status == crate::monitor::RequestStatus::Failed
         || request.http_status.is_some_and(|status| status >= 400)
         || request
@@ -588,8 +588,6 @@ fn detail_indicator(request: &CompletedRequest) -> &'static str {
             .is_some_and(|error| !error.is_empty())
     {
         "!"
-    } else if request.traffic_capture_path.is_some() {
-        "…"
     } else {
         ""
     }
@@ -765,7 +763,7 @@ fn render_recent(
             Constraint::Length(10),
             Constraint::Length(7),
             Constraint::Length(7),
-            Constraint::Length(1),
+            Constraint::Length(3),
         ]
     };
     let model_width = table_column_width(area, &widths, 3);
@@ -773,7 +771,7 @@ fn render_recent(
         let detail = if show_detail {
             request.error.as_deref().unwrap_or("")
         } else {
-            detail_indicator(request)
+            error_indicator(request)
         };
         Row::new(vec![
             muted_cell(format_system_time(request.finished_at)),
@@ -1276,7 +1274,7 @@ mod tests {
             table_header_labels(&RECENT_INDICATOR_TABLE_HEADERS),
             [
                 "Finished", "Status", "Provider", "Model", "Effort", "Latency", "Rate", "In",
-                "Out", "D",
+                "Out", "Err",
             ]
         );
         assert_eq!(
@@ -1451,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_table_uses_detail_indicator_at_medium_width() {
+    fn recent_table_uses_error_indicator_at_medium_width() {
         let monitor = MonitorHandle::new(10);
         monitor.request_started("request-1", None, None, EndpointKind::Messages);
         monitor.provider_selected("request-1", "codex", "gpt-5.6-sol", None);
@@ -1463,7 +1461,7 @@ mod tests {
         });
         let recent_text = buffer_text(&recent);
 
-        assert!(recent_text.contains("D"), "{recent_text}");
+        assert!(recent_text.contains("Err"), "{recent_text}");
         assert!(recent_text.contains("!"), "{recent_text}");
         assert!(!recent_text.contains("Details"), "{recent_text}");
         assert!(
