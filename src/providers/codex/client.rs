@@ -802,7 +802,8 @@ fn summarize_json_request_size(body: &serde_json::Value, body_json: &str) -> ser
 }
 
 fn is_retryable_transport_error(err: &CodexError) -> bool {
-    (err.detail.as_deref() == Some("websocket_pre_request") && should_retry_status(err.status))
+    (err.detail.as_deref() == Some("websocket_pre_request")
+        && (err.status == 0 || should_retry_status(err.status)))
         || (err.status == 0
             && (err.message.contains("Timed out waiting")
                 || err.message.contains("Transport error")
@@ -907,6 +908,19 @@ mod tests {
             message: "WebSocket connect error".to_string(),
             detail: Some("websocket_pre_request".to_string()),
             retry_after: Some("3".to_string()),
+            origin: CodexErrorOrigin::WebSocket,
+        };
+
+        assert!(is_retryable_transport_error(&err));
+    }
+
+    #[test]
+    fn websocket_pre_request_statusless_error_is_retryable() {
+        let err = CodexError {
+            status: 0,
+            message: "WebSocket connect timeout after 15000ms".to_string(),
+            detail: Some("websocket_pre_request".to_string()),
+            retry_after: None,
             origin: CodexErrorOrigin::WebSocket,
         };
 
