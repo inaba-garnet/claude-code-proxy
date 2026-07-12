@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.12 (2026-07-12)
+
+- Codex hosted web searches work with GPT-5.6 models instead of failing with an
+  unsupported tool error. ([#26](https://github.com/raine/claude-code-proxy/issues/26),
+  [#35](https://github.com/raine/claude-code-proxy/pull/35))
+- Codex WebSocket connection timeouts are retried automatically, reducing
+  interrupted requests.
+
 ## v0.1.11 (2026-07-11)
 
 - Grok subscriptions can power Claude Code through browser login, with support for
