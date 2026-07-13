@@ -296,7 +296,6 @@ impl CodexHttpClient {
         continuation: Option<&super::continuation::ContinuationCandidate>,
         transport: crate::config::CodexTransport,
     ) -> Result<CodexResponse, CodexError> {
-        use super::continuation::clear_continuation;
         use crate::config::CodexTransport;
 
         let mut auth = self.auth_manager.get_auth().await.map_err(|e| CodexError {
@@ -311,14 +310,18 @@ impl CodexHttpClient {
         if should_reset_websocket_pool(continuation)
             && let Some(key) = initial_pool_key
         {
-            super::websocket::invalidate_codex_websocket_pool_key(key);
+            super::websocket::invalidate_codex_websocket_pool_turn(
+                key,
+                continuation.and_then(|candidate| candidate.turn_id),
+            );
         }
 
-        let mut active_continuation = continuation;
+        let turn_id = continuation.and_then(|candidate| candidate.turn_id);
+        let mut active_continuation = continuation.cloned();
         let mut auth_refresh_attempted = false;
         let mut transport_failures = 0u32;
         loop {
-            let pool_key = websocket_pool_key(ctx, active_continuation);
+            let pool_key = websocket_pool_key(ctx, active_continuation.as_ref());
             let result = match transport {
                 CodexTransport::Http => {
                     let body_json = serde_json::to_string(body).map_err(|e| CodexError {
@@ -335,7 +338,7 @@ impl CodexHttpClient {
                     let ws_headers =
                         build_codex_headers(&auth, ctx, body.client_metadata.is_some())?;
                     let ws_headers = super::websocket::codex_websocket_headers(&ws_headers);
-                    let ws_body = build_websocket_request(body, active_continuation);
+                    let ws_body = build_websocket_request(body, active_continuation.as_ref());
 
                     super::websocket::codex_websocket_request(
                         &self.base_url,
@@ -346,7 +349,7 @@ impl CodexHttpClient {
                         pool_key,
                         super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
                         super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
-                        active_continuation,
+                        active_continuation.as_ref(),
                     )
                     .await
                 }
@@ -354,7 +357,7 @@ impl CodexHttpClient {
                     let ws_headers =
                         build_codex_headers(&auth, ctx, body.client_metadata.is_some())?;
                     let ws_headers = super::websocket::codex_websocket_headers(&ws_headers);
-                    let ws_body = build_websocket_request(body, active_continuation);
+                    let ws_body = build_websocket_request(body, active_continuation.as_ref());
 
                     // Try WebSocket first
                     let ws_result = super::websocket::codex_websocket_request(
@@ -366,7 +369,7 @@ impl CodexHttpClient {
                         pool_key,
                         super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
                         super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
-                        active_continuation,
+                        active_continuation.as_ref(),
                     )
                     .await;
 
@@ -401,8 +404,10 @@ impl CodexHttpClient {
                     Ok(new_auth) => {
                         auth = new_auth;
                         if let Some(key) = pool_key {
-                            super::websocket::invalidate_codex_websocket_pool_key(key);
+                            super::websocket::invalidate_codex_websocket_pool_turn(key, turn_id);
                         }
+                        active_continuation =
+                            full_context_continuation(active_continuation.as_ref());
                         continue;
                     }
                     Err(e) => {
@@ -443,6 +448,7 @@ impl CodexHttpClient {
                         &failure.message,
                     );
                     transport_failures += 1;
+                    active_continuation = full_context_continuation(active_continuation.as_ref());
                     sleep(delay.wait_ms).await;
                     continue;
                 }
@@ -569,12 +575,13 @@ impl CodexHttpClient {
                     return Err(codex_status_error(response, transport));
                 }
                 Ok(response) => return Ok(response),
-                Err(err) if should_retry_without_continuation(&err, active_continuation) => {
-                    clear_continuation(ctx.session_id.as_deref());
+                Err(err)
+                    if should_retry_without_continuation(&err, active_continuation.as_ref()) =>
+                {
                     if let Some(key) = pool_key {
-                        super::websocket::invalidate_codex_websocket_pool_key(key);
+                        super::websocket::invalidate_codex_websocket_pool_turn(key, turn_id);
                     }
-                    active_continuation = None;
+                    active_continuation = full_context_continuation(active_continuation.as_ref());
                     continue;
                 }
                 Err(err) => {
@@ -628,11 +635,12 @@ impl CodexHttpClient {
             origin: CodexErrorOrigin::Auth,
         })?;
 
+        let turn_id = continuation.and_then(|candidate| candidate.turn_id);
         let pool_key = websocket_pool_key(ctx, continuation).map(str::to_string);
         if should_reset_websocket_pool(continuation)
             && let Some(key) = pool_key.as_deref()
         {
-            super::websocket::invalidate_codex_websocket_pool_key(key);
+            super::websocket::invalidate_codex_websocket_pool_turn(key, turn_id);
         }
 
         let client = self.clone();
@@ -658,6 +666,9 @@ impl CodexHttpClient {
         pool_key: Option<String>,
         tx: tokio::sync::mpsc::Sender<Result<serde_json::Value, CodexError>>,
     ) {
+        let turn_id = continuation
+            .as_ref()
+            .and_then(|candidate| candidate.turn_id);
         let mut auth_refresh_attempted = false;
         let mut continuation_retry_available = continuation
             .as_ref()
@@ -688,8 +699,9 @@ impl CodexHttpClient {
             );
             let mut stream = tokio::select! {
                 _ = tx.closed() => {
+                    super::continuation::abort_continuation(ctx.session_id.as_deref(), turn_id);
                     if let Some(key) = pool_key.as_deref() {
-                        super::websocket::invalidate_codex_websocket_pool_key(key);
+                        super::websocket::invalidate_codex_websocket_pool_turn(key, turn_id);
                     }
                     return;
                 }
@@ -698,7 +710,7 @@ impl CodexHttpClient {
                     Err(err) if err.status == 401 && !auth_refresh_attempted && !forwarded_any => {
                         auth_refresh_attempted = true;
                         if let Some(key) = pool_key.as_deref() {
-                            super::websocket::invalidate_codex_websocket_pool_key(key);
+                            super::websocket::invalidate_codex_websocket_pool_turn(key, turn_id);
                         }
                         let refresh = self.auth_manager.force_refresh(&auth.access);
                         auth = match refresh.await {
@@ -713,15 +725,15 @@ impl CodexHttpClient {
                                 return;
                             }
                         };
+                        continuation = full_context_continuation(continuation.as_ref());
                         continue 'attempt;
                     }
                     Err(err) if continuation_retry_available && is_continuation_retry_error(&err) => {
                         continuation_retry_available = false;
-                        super::continuation::clear_continuation(ctx.session_id.as_deref());
                         if let Some(key) = pool_key.as_deref() {
-                            super::websocket::invalidate_codex_websocket_pool_key(key);
+                            super::websocket::invalidate_codex_websocket_pool_turn(key, turn_id);
                         }
-                        continuation = None;
+                        continuation = full_context_continuation(continuation.as_ref());
                         continue 'attempt;
                     }
                     Err(err) => {
@@ -735,7 +747,7 @@ impl CodexHttpClient {
                 let item = tokio::select! {
                     _ = tx.closed() => {
                         if let Some(key) = pool_key.as_deref() {
-                            super::websocket::invalidate_codex_websocket_pool_key(key);
+                            super::websocket::invalidate_codex_websocket_pool_turn(key, turn_id);
                         }
                         return;
                     }
@@ -752,7 +764,7 @@ impl CodexHttpClient {
                 if unauthorized && !auth_refresh_attempted && !forwarded_any {
                     auth_refresh_attempted = true;
                     if let Some(key) = pool_key.as_deref() {
-                        super::websocket::invalidate_codex_websocket_pool_key(key);
+                        super::websocket::invalidate_codex_websocket_pool_turn(key, turn_id);
                     }
                     let refresh = self.auth_manager.force_refresh(&auth.access);
                     auth = match refresh.await {
@@ -776,18 +788,20 @@ impl CodexHttpClient {
                     && !forwarded_any
                 {
                     continuation_retry_available = false;
-                    super::continuation::clear_continuation(ctx.session_id.as_deref());
                     if let Some(key) = pool_key.as_deref() {
-                        super::websocket::invalidate_codex_websocket_pool_key(key);
+                        super::websocket::invalidate_codex_websocket_pool_turn(key, turn_id);
                     }
-                    continuation = None;
+                    continuation = full_context_continuation(continuation.as_ref());
                     continue 'attempt;
                 }
 
-                forwarded_any = true;
+                if item.as_ref().is_ok_and(event_closes_live_retry_window) {
+                    forwarded_any = true;
+                }
                 if tx.send(item).await.is_err() {
+                    super::continuation::abort_continuation(ctx.session_id.as_deref(), turn_id);
                     if let Some(key) = pool_key.as_deref() {
-                        super::websocket::invalidate_codex_websocket_pool_key(key);
+                        super::websocket::invalidate_codex_websocket_pool_turn(key, turn_id);
                     }
                     return;
                 }
@@ -1217,6 +1231,25 @@ fn should_retry_without_continuation(
     is_continuation_retry_error(err)
 }
 
+fn full_context_continuation(
+    continuation: Option<&super::continuation::ContinuationCandidate>,
+) -> Option<super::continuation::ContinuationCandidate> {
+    continuation.map(|candidate| super::continuation::ContinuationCandidate {
+        turn_id: candidate.turn_id,
+        previous_response_id: None,
+        input_delta: None,
+        input_delta_count: candidate.input_delta_count,
+        disabled_reason: Some("full_context_retry".to_string()),
+    })
+}
+
+fn event_closes_live_retry_window(payload: &serde_json::Value) -> bool {
+    !matches!(
+        payload.get("type").and_then(|value| value.as_str()),
+        Some("codex.rate_limits" | "keepalive")
+    )
+}
+
 fn is_continuation_retry_error(err: &CodexError) -> bool {
     matches!(
         err.detail.as_deref(),
@@ -1244,7 +1277,7 @@ fn should_reset_websocket_pool(
     let Some(reason) = continuation.and_then(|c| c.disabled_reason.as_deref()) else {
         return false;
     };
-    !matches!(reason, "missing_state" | "disabled")
+    reason != "disabled"
 }
 
 #[cfg(test)]
@@ -1775,18 +1808,21 @@ mod tests {
             monitor: None,
         };
         let disabled = super::super::continuation::ContinuationCandidate {
+            turn_id: None,
             previous_response_id: None,
             input_delta: None,
             input_delta_count: 1,
             disabled_reason: Some("disabled".into()),
         };
         let first_enabled = super::super::continuation::ContinuationCandidate {
+            turn_id: None,
             previous_response_id: None,
             input_delta: None,
             input_delta_count: 1,
             disabled_reason: Some("missing_state".into()),
         };
         let append = super::super::continuation::ContinuationCandidate {
+            turn_id: None,
             previous_response_id: Some("resp_1".into()),
             input_delta: None,
             input_delta_count: 1,
@@ -1802,27 +1838,30 @@ mod tests {
     }
 
     #[test]
-    fn websocket_pool_reset_ignores_initial_and_disabled_states() {
+    fn websocket_pool_reset_clears_initial_stale_state() {
         let missing_state = super::super::continuation::ContinuationCandidate {
+            turn_id: None,
             previous_response_id: None,
             input_delta: None,
             input_delta_count: 1,
             disabled_reason: Some("missing_state".into()),
         };
         let disabled = super::super::continuation::ContinuationCandidate {
+            turn_id: None,
             previous_response_id: None,
             input_delta: None,
             input_delta_count: 1,
             disabled_reason: Some("disabled".into()),
         };
         let prompt_changed = super::super::continuation::ContinuationCandidate {
+            turn_id: None,
             previous_response_id: None,
             input_delta: None,
             input_delta_count: 1,
             disabled_reason: Some("prompt_changed".into()),
         };
 
-        assert!(!should_reset_websocket_pool(Some(&missing_state)));
+        assert!(should_reset_websocket_pool(Some(&missing_state)));
         assert!(!should_reset_websocket_pool(Some(&disabled)));
         assert!(should_reset_websocket_pool(Some(&prompt_changed)));
     }
@@ -1933,14 +1972,30 @@ mod tests {
     }
 
     #[test]
+    fn informational_events_keep_live_continuation_retry_available() {
+        assert!(!event_closes_live_retry_window(&serde_json::json!({
+            "type": "codex.rate_limits",
+            "rate_limits": {"limit_reached": false}
+        })));
+        assert!(!event_closes_live_retry_window(&serde_json::json!({
+            "type": "keepalive"
+        })));
+        assert!(event_closes_live_retry_window(&serde_json::json!({
+            "type": "response.created"
+        })));
+    }
+
+    #[test]
     fn continuation_retry_requires_previous_response_id() {
         let append = super::super::continuation::ContinuationCandidate {
+            turn_id: None,
             previous_response_id: Some("resp_1".into()),
             input_delta: None,
             input_delta_count: 1,
             disabled_reason: None,
         };
         let initial = super::super::continuation::ContinuationCandidate {
+            turn_id: None,
             previous_response_id: None,
             input_delta: None,
             input_delta_count: 1,

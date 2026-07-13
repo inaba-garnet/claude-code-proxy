@@ -29,7 +29,7 @@ use self::auth::manager::CodexAuthManager;
 use self::auth::token_store::file_store;
 use self::client::CodexHttpClient;
 use self::continuation::{
-    ContinuationCandidate, clear_continuation, continuation_candidate, record_continuation,
+    ContinuationCandidate, abort_continuation, continuation_candidate, record_continuation,
 };
 use self::count_tokens::count_translated_tokens;
 use self::translate::accumulate::accumulate_response_with_traffic;
@@ -135,6 +135,7 @@ impl Provider for CodexProvider {
             &translated,
             previous_response_id_enabled,
         );
+        let turn_id = continuation.turn_id;
 
         // Post to upstream with continuation
         let client = self.client.clone();
@@ -160,7 +161,7 @@ impl Provider for CodexProvider {
         {
             Ok(r) => r,
             Err(e) => {
-                clear_continuation(ctx.session_id.as_deref());
+                abort_continuation(ctx.session_id.as_deref(), turn_id);
                 return map_codex_error_to_response(&e);
             }
         };
@@ -174,7 +175,7 @@ impl Provider for CodexProvider {
             ) {
                 Ok(b) => b,
                 Err(e) => {
-                    clear_continuation(ctx.session_id.as_deref());
+                    abort_continuation(ctx.session_id.as_deref(), turn_id);
                     return map_codex_failure_to_response(&format!(
                         "Stream translation error: {e}"
                     ));
@@ -192,6 +193,7 @@ impl Provider for CodexProvider {
             }
             update_continuation_from_upstream(
                 ctx.session_id.as_deref(),
+                turn_id,
                 &translated,
                 &upstream.body,
             );
@@ -220,13 +222,14 @@ impl Provider for CodexProvider {
                     }
                     update_continuation_from_upstream(
                         ctx.session_id.as_deref(),
+                        turn_id,
                         &translated,
                         &upstream.body,
                     );
                     (StatusCode::OK, Json(json)).into_response()
                 }
                 Err(e) => {
-                    clear_continuation(ctx.session_id.as_deref());
+                    abort_continuation(ctx.session_id.as_deref(), turn_id);
                     map_codex_failure_to_response(&format!("Accumulation error: {e}"))
                 }
             }
@@ -302,10 +305,7 @@ fn count_sse_events(bytes: &[u8]) -> u64 {
 
 enum LiveStreamStart {
     Response(Response),
-    Retry {
-        error: client::CodexError,
-        full_context: bool,
-    },
+    Retry { error: client::CodexError },
 }
 
 async fn live_stream_response(
@@ -317,6 +317,7 @@ async fn live_stream_response(
     continuation: ContinuationCandidate,
 ) -> Response {
     let model = model.to_string();
+    let turn_id = continuation.turn_id;
     let mut attempt = 0_u32;
     let mut continuation = Some(continuation);
 
@@ -327,19 +328,18 @@ async fn live_stream_response(
         {
             Ok(events) => events,
             Err(err) if retryable_live_start_codex_error(&err) => {
-                if retry_with_full_context_for_live_error(&err)
-                    && drop_live_continuation_for_retry(&mut continuation, &ctx)
-                {
+                let dropped = drop_live_continuation_for_retry(&mut continuation);
+                if dropped && is_missing_previous_response_error(&err) {
                     attempt += 1;
                     continue;
                 }
                 if attempt >= MAX_RETRYABLE_LIVE_STREAM_RETRIES {
-                    clear_continuation(ctx.session_id.as_deref());
+                    abort_continuation(ctx.session_id.as_deref(), turn_id);
                     return map_codex_error_to_response(&err);
                 }
                 let delay = compute_backoff_delay(attempt, err.retry_after.as_deref());
                 if delay.exceeds_budget {
-                    clear_continuation(ctx.session_id.as_deref());
+                    abort_continuation(ctx.session_id.as_deref(), turn_id);
                     return map_codex_error_to_response(&err);
                 }
                 attempt += 1;
@@ -347,7 +347,7 @@ async fn live_stream_response(
                 continue;
             }
             Err(err) => {
-                clear_continuation(ctx.session_id.as_deref());
+                abort_continuation(ctx.session_id.as_deref(), turn_id);
                 return map_codex_error_to_response(&err);
             }
         };
@@ -357,26 +357,25 @@ async fn live_stream_response(
             message_id.clone(),
             &model,
             ctx.clone(),
+            turn_id,
             request_body.clone(),
         )
         .await
         {
             LiveStreamStart::Response(response) => return response,
-            LiveStreamStart::Retry {
-                error,
-                full_context,
-            } => {
-                if full_context && drop_live_continuation_for_retry(&mut continuation, &ctx) {
+            LiveStreamStart::Retry { error } => {
+                let dropped = drop_live_continuation_for_retry(&mut continuation);
+                if dropped && is_missing_previous_response_error(&error) {
                     attempt += 1;
                     continue;
                 }
                 if attempt >= MAX_RETRYABLE_LIVE_STREAM_RETRIES {
-                    clear_continuation(ctx.session_id.as_deref());
+                    abort_continuation(ctx.session_id.as_deref(), turn_id);
                     return map_codex_error_to_response(&error);
                 }
                 let delay = compute_backoff_delay(attempt, error.retry_after.as_deref());
                 if delay.exceeds_budget {
-                    clear_continuation(ctx.session_id.as_deref());
+                    abort_continuation(ctx.session_id.as_deref(), turn_id);
                     return map_codex_error_to_response(&error);
                 }
                 attempt += 1;
@@ -391,6 +390,7 @@ async fn live_stream_response_once(
     message_id: String,
     model: &str,
     ctx: RequestContext,
+    turn_id: Option<u64>,
     request_body: translate::request::ResponsesRequest,
 ) -> LiveStreamStart {
     let mut translator = LiveStreamTranslator::new(message_id, model.to_string());
@@ -401,13 +401,9 @@ async fn live_stream_response_once(
             Ok(payload) => payload,
             Err(err) => {
                 if retryable_live_start_codex_error(&err) {
-                    let full_context = retry_with_full_context_for_live_error(&err);
-                    return LiveStreamStart::Retry {
-                        error: err,
-                        full_context,
-                    };
+                    return LiveStreamStart::Retry { error: err };
                 }
-                clear_continuation(ctx.session_id.as_deref());
+                abort_continuation(ctx.session_id.as_deref(), turn_id);
                 return LiveStreamStart::Response(map_codex_error_to_response(&err));
             }
         };
@@ -447,10 +443,9 @@ async fn live_stream_response_once(
                             retry_after: retry_after_from_live_payload(&payload),
                             origin: client::CodexErrorOrigin::WebSocket,
                         },
-                        full_context: false,
                     };
                 }
-                clear_continuation(ctx.session_id.as_deref());
+                abort_continuation(ctx.session_id.as_deref(), turn_id);
                 return LiveStreamStart::Response(map_codex_failure_to_response(&message));
             }
         };
@@ -459,6 +454,7 @@ async fn live_stream_response_once(
             if terminal {
                 update_continuation_from_upstream(
                     ctx.session_id.as_deref(),
+                    turn_id,
                     &request_body,
                     &upstream_sse_body,
                 );
@@ -469,6 +465,7 @@ async fn live_stream_response_once(
                 translator,
                 chunk,
                 ctx,
+                turn_id,
                 request_body,
                 upstream_sse_body,
             ));
@@ -476,6 +473,7 @@ async fn live_stream_response_once(
         if terminal {
             update_continuation_from_upstream(
                 ctx.session_id.as_deref(),
+                turn_id,
                 &request_body,
                 &upstream_sse_body,
             );
@@ -491,7 +489,6 @@ async fn live_stream_response_once(
             retry_after: None,
             origin: client::CodexErrorOrigin::WebSocket,
         },
-        full_context: true,
     }
 }
 
@@ -533,13 +530,14 @@ fn remaining_live_stream_response(
     mut translator: LiveStreamTranslator,
     first_chunk: Vec<u8>,
     ctx: RequestContext,
+    turn_id: Option<u64>,
     request_body: translate::request::ResponsesRequest,
     mut upstream_sse_body: Vec<u8>,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     tokio::spawn(async move {
         if tx.send(Ok(Bytes::from(first_chunk))).await.is_err() {
-            clear_continuation(ctx.session_id.as_deref());
+            abort_continuation(ctx.session_id.as_deref(), turn_id);
             return;
         }
         while let Some(item) = upstream_events.recv().await {
@@ -550,7 +548,7 @@ fn remaining_live_stream_response(
                         match translate_live_stream_payload(&mut translator, &payload, &ctx) {
                             Ok(result) => result,
                             Err(message) => {
-                                clear_continuation(ctx.session_id.as_deref());
+                                abort_continuation(ctx.session_id.as_deref(), turn_id);
                                 let chunk = translator.error_chunk(
                                     &message,
                                     "api_error",
@@ -566,13 +564,14 @@ fn remaining_live_stream_response(
                     if !chunk.is_empty() {
                         record_live_stream_progress(&ctx, &chunk);
                         if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
-                            clear_continuation(ctx.session_id.as_deref());
+                            abort_continuation(ctx.session_id.as_deref(), turn_id);
                             return;
                         }
                     }
                     if terminal {
                         update_continuation_from_upstream(
                             ctx.session_id.as_deref(),
+                            turn_id,
                             &request_body,
                             &upstream_sse_body,
                         );
@@ -580,7 +579,7 @@ fn remaining_live_stream_response(
                     }
                 }
                 Err(err) => {
-                    clear_continuation(ctx.session_id.as_deref());
+                    abort_continuation(ctx.session_id.as_deref(), turn_id);
                     let chunk =
                         translator.finish_after_closed_completed_tool_call(ctx.traffic.as_deref());
                     if !chunk.is_empty() {
@@ -603,7 +602,7 @@ fn remaining_live_stream_response(
             }
         }
 
-        clear_continuation(ctx.session_id.as_deref());
+        abort_continuation(ctx.session_id.as_deref(), turn_id);
         let chunk = translator.finish_after_closed_completed_tool_call(ctx.traffic.as_deref());
         if !chunk.is_empty() {
             record_live_stream_progress(&ctx, &chunk);
@@ -669,19 +668,11 @@ fn retryable_live_start_codex_error(err: &client::CodexError) -> bool {
         || (err.status == 0 && retryable_live_message(codex_error_message(err)))
 }
 
-fn retry_with_full_context_for_live_error(err: &client::CodexError) -> bool {
-    matches!(
-        err.detail.as_deref(),
-        Some("previous_response_not_found")
-            | Some(websocket::WEBSOCKET_RESPONSE_START_TIMEOUT_DETAIL)
-            | Some(websocket::WEBSOCKET_MISSING_TERMINAL_DETAIL)
-    )
+fn is_missing_previous_response_error(err: &client::CodexError) -> bool {
+    err.detail.as_deref() == Some("previous_response_not_found")
 }
 
-fn drop_live_continuation_for_retry(
-    continuation: &mut Option<ContinuationCandidate>,
-    ctx: &RequestContext,
-) -> bool {
+fn drop_live_continuation_for_retry(continuation: &mut Option<ContinuationCandidate>) -> bool {
     if continuation
         .as_ref()
         .and_then(|candidate| candidate.previous_response_id.as_deref())
@@ -690,8 +681,11 @@ fn drop_live_continuation_for_retry(
         return false;
     }
 
-    clear_continuation(ctx.session_id.as_deref());
-    *continuation = None;
+    if let Some(candidate) = continuation.as_mut() {
+        candidate.previous_response_id = None;
+        candidate.input_delta = None;
+        candidate.disabled_reason = Some("full_context_retry".to_string());
+    }
     true
 }
 
@@ -734,6 +728,7 @@ fn codex_stream_error_type(err: &client::CodexError) -> &'static str {
 
 fn update_continuation_from_upstream(
     session_id: Option<&str>,
+    turn_id: Option<u64>,
     request_body: &translate::request::ResponsesRequest,
     upstream_body: &[u8],
 ) {
@@ -741,12 +736,13 @@ fn update_continuation_from_upstream(
         Ok(Some(finish)) if finish.continuation_eligible => {
             record_continuation(
                 session_id,
+                turn_id,
                 request_body,
                 finish.response_id.as_deref(),
                 &finish.output_items,
             );
         }
-        _ => clear_continuation(session_id),
+        _ => abort_continuation(session_id, turn_id),
     }
 }
 

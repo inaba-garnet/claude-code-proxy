@@ -379,6 +379,11 @@ async fn spawn_websocket_previous_missing_then_retry_upstream(
                 }
 
                 if handled == 1 {
+                    let rate_limits = json!({
+                        "type": "codex.rate_limits",
+                        "rate_limits": {"limit_reached": false}
+                    });
+                    let _ = sender.send(Message::Text(rate_limits.to_string())).await;
                     let event = json!({
                         "type": "error",
                         "error": {

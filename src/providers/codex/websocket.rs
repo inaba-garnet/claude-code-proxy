@@ -111,6 +111,45 @@ pub fn invalidate_codex_websocket_pool_key(session_id: &str) {
     guard.remove(session_id);
 }
 
+pub fn invalidate_codex_websocket_pool_turn(session_id: &str, turn_id: Option<u64>) {
+    super::continuation::with_current_turn(Some(session_id), turn_id, || {
+        invalidate_codex_websocket_pool_key(session_id)
+    });
+}
+
+fn invalidate_pool_entry(session_id: &str, entry: &Arc<PoolEntry>) {
+    let mut guard = WS_POOL.lock().unwrap();
+    if guard
+        .get(session_id)
+        .is_some_and(|pooled| Arc::ptr_eq(pooled, entry))
+    {
+        guard.remove(session_id);
+    }
+}
+
+fn invalidate_pool_owner(pool_key: Option<&str>, entry: Option<&Arc<PoolEntry>>) {
+    let Some(session_id) = pool_key else {
+        return;
+    };
+    match entry {
+        Some(entry) => invalidate_pool_entry(session_id, entry),
+        None => invalidate_codex_websocket_pool_key(session_id),
+    }
+}
+
+fn pool_get_for_turn(key: &str, turn_id: Option<u64>) -> Option<Arc<PoolEntry>> {
+    super::continuation::if_current_turn(Some(key), turn_id, || {
+        let guard = WS_POOL.lock().ok()?;
+        guard.get(key).cloned()
+    })
+    .flatten()
+}
+
+fn pool_insert_for_turn(key: String, entry: Arc<PoolEntry>, turn_id: Option<u64>) {
+    let session_id = key.clone();
+    super::continuation::with_current_turn(Some(&session_id), turn_id, || pool_insert(key, entry));
+}
+
 fn pool_insert(key: String, entry: Arc<PoolEntry>) {
     let mut guard = WS_POOL.lock().unwrap();
     // Evict oldest if at capacity
@@ -296,8 +335,7 @@ pub async fn codex_websocket_request(
 
     // Check pool for existing connection
     let pooled = pool_key.and_then(|key| {
-        let guard = WS_POOL.lock().ok()?;
-        guard.get(key).cloned()
+        pool_get_for_turn(key, continuation.and_then(|candidate| candidate.turn_id))
     });
 
     let (ws_stream, _response) = if let Some(entry) = pooled {
@@ -305,7 +343,7 @@ pub async fn codex_websocket_request(
         let mut ws_guard = entry.ws.lock().await;
         // Check if connection is still alive by sending a ping
         if ws_guard.send(Message::Ping(vec![])).await.is_err() {
-            invalidate_codex_websocket_pool_key(pool_key.unwrap());
+            invalidate_pool_entry(pool_key.unwrap(), &entry);
             // Fall through to new connection
             connect_with_timeout(&ws_url, headers, connect_timeout_ms).await?
         } else {
@@ -313,7 +351,7 @@ pub async fn codex_websocket_request(
             let ws_msg = Message::Text(body_json.clone());
             ws_guard.send(ws_msg).await.map_err(|e| {
                 if let Some(key) = pool_key {
-                    invalidate_codex_websocket_pool_key(key);
+                    invalidate_pool_entry(key, &entry);
                 }
                 CodexError {
                     status: 0,
@@ -325,8 +363,14 @@ pub async fn codex_websocket_request(
             })?;
 
             // Collect events
-            let (sse_body, terminal_event) =
-                collect_ws_events(&mut ws_guard, idle_timeout_ms, pool_key, traffic).await?;
+            let (sse_body, terminal_event) = collect_ws_events(
+                &mut ws_guard,
+                idle_timeout_ms,
+                pool_key,
+                Some(&entry),
+                traffic,
+            )
+            .await?;
             let Some(terminal_event) = terminal_event else {
                 return Err(missing_terminal_error());
             };
@@ -383,15 +427,21 @@ pub async fn codex_websocket_request(
             origin: CodexErrorOrigin::WebSocket,
         })?;
 
-        let (sse_body, terminal_event) =
-            collect_ws_events(&mut ws_guard, idle_timeout_ms, pool_key, traffic).await?;
+        let (sse_body, terminal_event) = collect_ws_events(
+            &mut ws_guard,
+            idle_timeout_ms,
+            pool_key,
+            Some(&entry),
+            traffic,
+        )
+        .await?;
         let Some(terminal_event) = terminal_event else {
             return Err(missing_terminal_error());
         };
 
         if is_previous_response_missing(&terminal_event.payload) {
             if let Some(key) = pool_key {
-                invalidate_codex_websocket_pool_key(key);
+                invalidate_pool_entry(key, &entry);
             }
             return Err(CodexError {
                 status: 0,
@@ -406,7 +456,11 @@ pub async fn codex_websocket_request(
         if let Some(key) = pool_key {
             let should_pool = terminal_event.event_type == "response.completed";
             if should_pool {
-                pool_insert(key.to_string(), entry.clone());
+                pool_insert_for_turn(
+                    key.to_string(),
+                    entry.clone(),
+                    continuation.and_then(|candidate| candidate.turn_id),
+                );
             }
         }
 
@@ -475,8 +529,7 @@ pub async fn codex_websocket_event_stream(
     }
 
     let pooled = pool_key.and_then(|key| {
-        let guard = WS_POOL.lock().ok()?;
-        guard.get(key).cloned()
+        pool_get_for_turn(key, continuation.and_then(|candidate| candidate.turn_id))
     });
     let used_pooled = pooled.is_some();
     let entry = if let Some(entry) = pooled {
@@ -494,13 +547,14 @@ pub async fn codex_websocket_event_stream(
     }
 
     let (tx, rx) = mpsc::channel(64);
+    let turn_id = continuation.and_then(|candidate| candidate.turn_id);
     let pool_key = pool_key.map(str::to_string);
     let ws = entry.ws.clone();
     tokio::spawn(async move {
         let mut ws_guard = ws.lock_owned().await;
         if used_pooled && ws_guard.send(Message::Ping(vec![])).await.is_err() {
             if let Some(key) = pool_key.as_deref() {
-                invalidate_codex_websocket_pool_key(key);
+                invalidate_pool_entry(key, &entry);
             }
             let _ = tx
                 .send(Err(CodexError {
@@ -515,7 +569,7 @@ pub async fn codex_websocket_event_stream(
         }
         if let Err(e) = ws_guard.send(Message::Text(body_json)).await {
             if let Some(key) = pool_key.as_deref() {
-                invalidate_codex_websocket_pool_key(key);
+                invalidate_pool_entry(key, &entry);
             }
             let _ = tx
                 .send(Err(CodexError {
@@ -533,6 +587,7 @@ pub async fn codex_websocket_event_stream(
             &mut ws_guard,
             idle_timeout_ms,
             pool_key.as_deref(),
+            Some(&entry),
             traffic,
             tx,
         )
@@ -541,10 +596,10 @@ pub async fn codex_websocket_event_stream(
         if let Some(key) = pool_key.as_deref() {
             if reusable {
                 if !used_pooled {
-                    pool_insert(key.to_string(), entry.clone());
+                    pool_insert_for_turn(key.to_string(), entry.clone(), turn_id);
                 }
             } else {
-                invalidate_codex_websocket_pool_key(key);
+                invalidate_pool_entry(key, &entry);
             }
         }
     });
@@ -732,6 +787,7 @@ async fn collect_ws_events(
     ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
     idle_timeout_ms: u64,
     pool_key: Option<&str>,
+    pool_entry: Option<&Arc<PoolEntry>>,
     traffic: Option<&TrafficCapture>,
 ) -> Result<(Vec<u8>, Option<WsEvent>), CodexError> {
     let mut sse_body: Vec<u8> = Vec::new();
@@ -751,9 +807,7 @@ async fn collect_ws_events(
             match response_event_budget.checked_sub(response_deadline_started.elapsed()) {
                 Some(remaining) if !remaining.is_zero() => remaining,
                 _ => {
-                    if let Some(key) = pool_key {
-                        invalidate_codex_websocket_pool_key(key);
-                    }
+                    invalidate_pool_owner(pool_key, pool_entry);
                     return Err(CodexError {
                         status: 0,
                         message: format!("WebSocket idle timeout after {idle_timeout_ms}ms"),
@@ -767,9 +821,7 @@ async fn collect_ws_events(
             match response_event_budget.checked_sub(response_deadline_started.elapsed()) {
                 Some(remaining) if !remaining.is_zero() => remaining,
                 _ => {
-                    if let Some(key) = pool_key {
-                        invalidate_codex_websocket_pool_key(key);
-                    }
+                    invalidate_pool_owner(pool_key, pool_entry);
                     return Err(response_start_timeout_error(idle_timeout_ms));
                 }
             }
@@ -778,9 +830,7 @@ async fn collect_ws_events(
         let timeout = tokio::time::timeout(read_timeout, ws.next());
 
         let frame = timeout.await.map_err(|_| {
-            if let Some(key) = pool_key {
-                invalidate_codex_websocket_pool_key(key);
-            }
+            invalidate_pool_owner(pool_key, pool_entry);
             if response_started {
                 CodexError {
                     status: 0,
@@ -841,9 +891,7 @@ async fn collect_ws_events(
             }
             Some(Ok(Message::Binary(_))) => {
                 // Reject binary frames
-                if let Some(key) = pool_key {
-                    invalidate_codex_websocket_pool_key(key);
-                }
+                invalidate_pool_owner(pool_key, pool_entry);
                 return Err(CodexError {
                     status: 0,
                     message: "WebSocket binary frames not supported".to_string(),
@@ -866,16 +914,12 @@ async fn collect_ws_events(
             }
             Some(Ok(Message::Close(_))) => {
                 // Connection closed - invalidate pool
-                if let Some(key) = pool_key {
-                    invalidate_codex_websocket_pool_key(key);
-                }
+                invalidate_pool_owner(pool_key, pool_entry);
                 break;
             }
             Some(Err(e)) => {
                 // Stream error - invalidate pool
-                if let Some(key) = pool_key {
-                    invalidate_codex_websocket_pool_key(key);
-                }
+                invalidate_pool_owner(pool_key, pool_entry);
                 return Err(CodexError {
                     status: 0,
                     message: format!("WebSocket stream error: {e}"),
@@ -886,9 +930,7 @@ async fn collect_ws_events(
             }
             None => {
                 // Stream ended - invalidate pool
-                if let Some(key) = pool_key {
-                    invalidate_codex_websocket_pool_key(key);
-                }
+                invalidate_pool_owner(pool_key, pool_entry);
                 break;
             }
         }
@@ -901,6 +943,7 @@ async fn stream_ws_events(
     ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
     idle_timeout_ms: u64,
     pool_key: Option<&str>,
+    pool_entry: Option<&Arc<PoolEntry>>,
     traffic: Option<Arc<TrafficCapture>>,
     tx: mpsc::Sender<Result<serde_json::Value, CodexError>>,
 ) -> bool {
@@ -923,9 +966,7 @@ async fn stream_ws_events(
             match response_event_budget.checked_sub(response_deadline_started.elapsed()) {
                 Some(remaining) if !remaining.is_zero() => remaining,
                 _ => {
-                    if let Some(key) = pool_key {
-                        invalidate_codex_websocket_pool_key(key);
-                    }
+                    invalidate_pool_owner(pool_key, pool_entry);
                     let err = if response_started {
                         CodexError {
                             status: 0,
@@ -945,9 +986,7 @@ async fn stream_ws_events(
         let frame = match tokio::time::timeout(read_timeout, ws.next()).await {
             Ok(frame) => frame,
             Err(_) => {
-                if let Some(key) = pool_key {
-                    invalidate_codex_websocket_pool_key(key);
-                }
+                invalidate_pool_owner(pool_key, pool_entry);
                 let err = if response_started {
                     CodexError {
                         status: 0,
@@ -998,9 +1037,7 @@ async fn stream_ws_events(
                 }
                 let terminal = is_terminal_event(&parsed);
                 if terminal && is_previous_response_missing(&parsed) {
-                    if let Some(key) = pool_key {
-                        invalidate_codex_websocket_pool_key(key);
-                    }
+                    invalidate_pool_owner(pool_key, pool_entry);
                     let _ = tx
                         .send(Err(CodexError {
                             status: 0,
@@ -1018,9 +1055,7 @@ async fn stream_ws_events(
                     .unwrap_or("unknown")
                     .to_string();
                 if tx.send(Ok(parsed)).await.is_err() {
-                    if let Some(key) = pool_key {
-                        invalidate_codex_websocket_pool_key(key);
-                    }
+                    invalidate_pool_owner(pool_key, pool_entry);
                     break;
                 }
                 if terminal {
@@ -1029,9 +1064,7 @@ async fn stream_ws_events(
                 }
             }
             Some(Ok(Message::Binary(_))) => {
-                if let Some(key) = pool_key {
-                    invalidate_codex_websocket_pool_key(key);
-                }
+                invalidate_pool_owner(pool_key, pool_entry);
                 let _ = tx
                     .send(Err(CodexError {
                         status: 0,
@@ -1048,16 +1081,12 @@ async fn stream_ws_events(
             }
             Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
             Some(Ok(Message::Close(_))) | None => {
-                if let Some(key) = pool_key {
-                    invalidate_codex_websocket_pool_key(key);
-                }
+                invalidate_pool_owner(pool_key, pool_entry);
                 let _ = tx.send(Err(missing_terminal_error())).await;
                 break;
             }
             Some(Err(e)) => {
-                if let Some(key) = pool_key {
-                    invalidate_codex_websocket_pool_key(key);
-                }
+                invalidate_pool_owner(pool_key, pool_entry);
                 let _ = tx
                     .send(Err(CodexError {
                         status: 0,
@@ -1368,7 +1397,8 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
             .unwrap();
-        let err = match collect_ws_events(&mut ws, 1_000, Some("binary-session"), None).await {
+        let err = match collect_ws_events(&mut ws, 1_000, Some("binary-session"), None, None).await
+        {
             Ok(_) => panic!("expected binary frame to fail"),
             Err(err) => err,
         };
@@ -1413,10 +1443,11 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
             .unwrap();
-        let err = match collect_ws_events(&mut ws, 50, Some("start-timeout-session"), None).await {
-            Ok(_) => panic!("expected response start timeout"),
-            Err(err) => err,
-        };
+        let err =
+            match collect_ws_events(&mut ws, 50, Some("start-timeout-session"), None, None).await {
+                Ok(_) => panic!("expected response start timeout"),
+                Err(err) => err,
+            };
 
         assert_eq!(
             err.detail.as_deref(),
@@ -1467,10 +1498,11 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
             .unwrap();
-        let err = match collect_ws_events(&mut ws, 50, Some("response-idle-session"), None).await {
-            Ok(_) => panic!("expected response idle timeout"),
-            Err(err) => err,
-        };
+        let err =
+            match collect_ws_events(&mut ws, 50, Some("response-idle-session"), None, None).await {
+                Ok(_) => panic!("expected response idle timeout"),
+                Err(err) => err,
+            };
 
         assert!(err.message.contains("idle timeout"));
         assert_eq!(err.detail, None);
