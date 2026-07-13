@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.17 (2026-07-14)
+
+- The proxy can listen on a configurable IP address through `CCP_BIND_ADDRESS`
+  or `bindAddress`, enabling protected access from containers and remote hosts.
+  ([#48](https://github.com/raine/claude-code-proxy/pull/48))
+- Model names with context-window hints such as `[1m]` route correctly across
+  providers. ([#50](https://github.com/raine/claude-code-proxy/pull/50))
+- The monitor reports more accurate output rates by measuring generation time
+  and excluding requests without complete usage and timing data.
+
 ## v0.1.16 (2026-07-13)
 
 - GPT-5.6 Luna requests work without a custom User-Agent instead of failing with
