@@ -1,3 +1,12 @@
+mod layout;
+
+use layout::{
+    CODE_WIDTH, COUNT_WIDTH, ColumnSpec, DURATION_WIDTH, EFFORT_WIDTH, ENDPOINT_WIDTH, ERROR_WIDTH,
+    ID_WIDTH, LayoutTier, MODEL_MEDIUM_WIDTH, MODEL_NARROW_WIDTH, MODEL_WIDE_WIDTH,
+    PROJECT_MEDIUM_WIDTH, PROJECT_WIDE_WIDTH, PROVIDER_WIDTH, RATE_WIDTH, STATUS_WIDTH, TIME_WIDTH,
+    TOKEN_WIDTH,
+};
+
 use std::{
     collections::HashMap,
     io::{self, Stdout},
@@ -42,107 +51,8 @@ const RED: Color = Color::Rgb(220, 120, 120);
 const YELLOW: Color = Color::Rgb(220, 200, 100);
 const BLUE: Color = Color::Rgb(120, 170, 230);
 const DIM: Color = Color::Rgb(100, 104, 114);
-const MODEL_COLUMN_WIDTH: u16 = 36;
-
 const SESSION_SPARKLINE_MIN_WIDTH: u16 = 170;
 const SESSION_SPARKLINE_MAX_TOKENS: u64 = 4_000;
-
-const SESSION_TABLE_HEADERS: [(&str, Alignment); 13] = [
-    ("", Alignment::Left),
-    ("ID", Alignment::Left),
-    ("Project", Alignment::Left),
-    ("A", Alignment::Right),
-    ("R", Alignment::Right),
-    ("F", Alignment::Right),
-    ("Prov", Alignment::Left),
-    ("Model", Alignment::Left),
-    ("Effort", Alignment::Left),
-    ("In", Alignment::Right),
-    ("Out", Alignment::Right),
-    ("Rate", Alignment::Right),
-    ("Status", Alignment::Left),
-];
-
-const SESSION_FULL_TABLE_HEADERS: [(&str, Alignment); 13] = [
-    ("", Alignment::Left),
-    ("ID", Alignment::Left),
-    ("Project", Alignment::Left),
-    ("A", Alignment::Right),
-    ("R", Alignment::Right),
-    ("F", Alignment::Right),
-    ("Provider", Alignment::Left),
-    ("Model", Alignment::Left),
-    ("Effort", Alignment::Left),
-    ("In", Alignment::Right),
-    ("Out", Alignment::Right),
-    ("Rate", Alignment::Right),
-    ("Status", Alignment::Left),
-];
-
-const SESSION_WIDE_TABLE_HEADERS: [(&str, Alignment); 14] = [
-    ("", Alignment::Left),
-    ("ID", Alignment::Left),
-    ("Project", Alignment::Left),
-    ("A", Alignment::Right),
-    ("R", Alignment::Right),
-    ("F", Alignment::Right),
-    ("Provider", Alignment::Left),
-    ("Model", Alignment::Left),
-    ("Effort", Alignment::Left),
-    ("In", Alignment::Right),
-    ("Out", Alignment::Right),
-    ("Rate", Alignment::Right),
-    ("Tokens/10s · 4k", Alignment::Left),
-    ("Status", Alignment::Left),
-];
-
-const ACTIVE_TABLE_HEADERS: [(&str, Alignment); 9] = [
-    ("Started", Alignment::Left),
-    ("Provider", Alignment::Left),
-    ("Model", Alignment::Left),
-    ("Effort", Alignment::Left),
-    ("Endpoint", Alignment::Left),
-    ("Status", Alignment::Left),
-    ("Rate", Alignment::Right),
-    ("Elapsed", Alignment::Right),
-    ("", Alignment::Left),
-];
-
-const RECENT_TABLE_HEADERS: [(&str, Alignment); 10] = [
-    ("Finished", Alignment::Left),
-    ("Status", Alignment::Left),
-    ("Provider", Alignment::Left),
-    ("Model", Alignment::Left),
-    ("Effort", Alignment::Left),
-    ("Latency", Alignment::Right),
-    ("Rate", Alignment::Right),
-    ("In", Alignment::Right),
-    ("Out", Alignment::Right),
-    ("Details", Alignment::Left),
-];
-
-const RECENT_INDICATOR_TABLE_HEADERS: [(&str, Alignment); 10] = [
-    ("Finished", Alignment::Left),
-    ("Status", Alignment::Left),
-    ("Provider", Alignment::Left),
-    ("Model", Alignment::Left),
-    ("Effort", Alignment::Left),
-    ("Latency", Alignment::Right),
-    ("Rate", Alignment::Right),
-    ("In", Alignment::Right),
-    ("Out", Alignment::Right),
-    ("Err", Alignment::Left),
-];
-
-const RECENT_DETAIL_WIDTH: u16 = 132;
-
-const EVENTS_TABLE_HEADERS: [(&str, Alignment); 5] = [
-    ("Time", Alignment::Left),
-    ("Status", Alignment::Left),
-    ("Provider", Alignment::Left),
-    ("Model", Alignment::Left),
-    ("Message", Alignment::Left),
-];
 
 pub struct MonitorUiConfig<'a> {
     pub listen_url: String,
@@ -802,114 +712,88 @@ fn token_sparkline_line(
     ])
 }
 
-fn table_value_width(header: &str, values: impl Iterator<Item = String>, maximum: u16) -> u16 {
-    values
-        .map(|value| value.chars().count())
-        .chain(std::iter::once(header.chars().count()))
-        .max()
-        .unwrap_or(0)
-        .min(usize::from(maximum)) as u16
+fn column_constraints<K>(columns: &[ColumnSpec<K>]) -> Vec<Constraint> {
+    columns.iter().map(ColumnSpec::constraint).collect()
 }
 
-fn session_table_widths(
-    sessions: &[SessionSummary],
-    show_sparkline: bool,
-    show_full_provider: bool,
-) -> Vec<Constraint> {
-    let project_width = table_value_width(
-        "Project",
-        sessions
+fn column_header<K>(columns: &[ColumnSpec<K>]) -> Row<'static> {
+    table_header_aligned(
+        columns
             .iter()
-            .map(|session| session.project.as_deref().unwrap_or("-").to_string()),
-        18,
-    );
-    let active_width = table_value_width(
-        "A",
-        sessions
-            .iter()
-            .map(|session| session.active_count.to_string()),
-        4,
-    );
-    let request_width = table_value_width(
-        "R",
-        sessions
-            .iter()
-            .map(|session| session.request_count.to_string()),
-        4,
-    );
-    let failure_width = table_value_width(
-        "F",
-        sessions
-            .iter()
-            .map(|session| session.failure_count.to_string()),
-        4,
-    );
-    let provider_width = table_value_width(
-        if show_full_provider {
-            "Provider"
-        } else {
-            "Prov"
-        },
-        sessions
-            .iter()
-            .map(|session| session.provider.as_deref().unwrap_or("-").to_string()),
-        10,
-    );
-    let effort_width = table_value_width(
-        "Effort",
-        sessions
-            .iter()
-            .map(|session| session.effort.as_deref().unwrap_or("-").to_string()),
-        7,
-    );
-    let input_width = table_value_width(
-        "In",
-        sessions
-            .iter()
-            .map(|session| compact_tokens(session.input_tokens)),
-        9,
-    );
-    let output_width = table_value_width(
-        "Out",
-        sessions
-            .iter()
-            .map(|session| compact_tokens(session.output_tokens)),
-        9,
-    );
-    let rate_width = table_value_width(
-        "Rate",
-        sessions.iter().map(|session| session.rate().label()),
-        12,
-    );
-    let status_width = table_value_width(
-        "Status",
-        sessions.iter().map(|session| session.last_status.clone()),
-        10,
-    );
+            .map(|column| (column.header, column.alignment)),
+    )
+}
 
-    let mut widths = vec![
-        Constraint::Length(1),
-        Constraint::Length(8),
-        Constraint::Length(project_width),
-        Constraint::Length(active_width),
-        Constraint::Length(request_width),
-        Constraint::Length(failure_width),
-        Constraint::Length(provider_width),
-        if show_sparkline {
-            Constraint::Length(MODEL_COLUMN_WIDTH)
-        } else {
-            Constraint::Fill(1)
-        },
-        Constraint::Length(effort_width),
-        Constraint::Length(input_width),
-        Constraint::Length(output_width),
-        Constraint::Length(rate_width),
-    ];
-    if show_sparkline {
-        widths.push(Constraint::Fill(1));
+fn target_cell(provider: Option<&str>, model: Option<&str>, width: usize) -> Cell<'static> {
+    let provider = provider.unwrap_or("-");
+    let model = model.unwrap_or("-");
+    text_cell(ellipsize(&format!("{provider}/{model}"), width))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionColumn {
+    Marker,
+    Id,
+    Project,
+    Active,
+    Requests,
+    Failures,
+    Counts,
+    Provider,
+    Model,
+    Target,
+    Effort,
+    Input,
+    Output,
+    Rate,
+    Activity,
+    Status,
+}
+
+fn session_columns(tier: LayoutTier, show_sparkline: bool) -> Vec<ColumnSpec<SessionColumn>> {
+    use SessionColumn as C;
+    match (tier, show_sparkline) {
+        (LayoutTier::Wide, true) => vec![
+            ColumnSpec::fixed(C::Marker, "", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Id, "ID", Alignment::Left, ID_WIDTH),
+            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_WIDE_WIDTH),
+            ColumnSpec::fixed(C::Active, "A", Alignment::Right, COUNT_WIDTH),
+            ColumnSpec::fixed(C::Requests, "R", Alignment::Right, COUNT_WIDTH),
+            ColumnSpec::fixed(C::Failures, "F", Alignment::Right, COUNT_WIDTH),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, MODEL_WIDE_WIDTH),
+            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
+            ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::flex(C::Activity, "Tokens/10s · 4k", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
+        ],
+        (LayoutTier::Medium | LayoutTier::Wide, _) => vec![
+            ColumnSpec::fixed(C::Marker, "", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Id, "ID", Alignment::Left, ID_WIDTH),
+            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
+            ColumnSpec::fixed(C::Counts, "A/R/F", Alignment::Right, 7),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
+        ],
+        (LayoutTier::Narrow, _) => vec![
+            ColumnSpec::fixed(C::Marker, "", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Id, "ID", Alignment::Left, ID_WIDTH),
+            ColumnSpec::fixed(C::Counts, "A/R/F", Alignment::Right, 7),
+            ColumnSpec::flex(C::Target, "Target", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
+        ],
+        (LayoutTier::Emergency, _) => vec![
+            ColumnSpec::fixed(C::Marker, "", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Id, "ID", Alignment::Left, ID_WIDTH),
+            ColumnSpec::flex(C::Target, "Target", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
+        ],
     }
-    widths.push(Constraint::Length(status_width));
-    widths
 }
 
 fn render_sessions(
@@ -924,121 +808,127 @@ fn render_sessions(
         return;
     }
 
-    let show_sparkline = area.width >= SESSION_SPARKLINE_MIN_WIDTH;
-    let full_provider_widths = session_table_widths(sessions, show_sparkline, true);
-    let show_full_provider = show_sparkline
-        || table_column_width(area, &full_provider_widths, 7)
-            >= usize::from(MODEL_COLUMN_WIDTH / 2);
-    let widths = if show_full_provider {
-        full_provider_widths
-    } else {
-        session_table_widths(sessions, false, false)
-    };
-    let model_width = table_column_width(area, &widths, 7);
-    let sparkline_width = show_sparkline
-        .then(|| table_column_width(area, &widths, 12))
-        .unwrap_or(0);
+    let tier = LayoutTier::for_outer_width(area.width);
+    let show_sparkline = tier == LayoutTier::Wide && area.width >= SESSION_SPARKLINE_MIN_WIDTH;
+    let columns = session_columns(tier, show_sparkline);
+    let widths = column_constraints(&columns);
     let now = SystemTime::now();
     let rows = sessions.iter().enumerate().map(|(index, session)| {
-        let marker = if focused && index == selected {
-            ">"
-        } else {
-            " "
-        };
-        let mut cells = vec![
-            Cell::from(Span::styled(marker, Style::default().fg(TEAL))),
-            text_cell(display_session_id(session.session_id.as_deref())),
-            text_cell(session.project.as_deref().unwrap_or("-")),
-            number_cell(session.active_count.to_string()),
-            number_cell(session.request_count.to_string()),
-            number_cell(session.failure_count.to_string()),
-            provider_cell(session.provider.as_deref()),
-            model_cell(session.model.as_deref(), model_width),
-            text_cell(session.effort.as_deref().unwrap_or("-")),
-            number_cell(compact_tokens(session.input_tokens)),
-            number_cell(compact_tokens(session.output_tokens)),
-            rate_cell(session.rate().label()),
-        ];
-        if show_sparkline {
-            cells.push(Cell::from(token_sparkline_line(
-                &session.output_token_samples,
-                sparkline_width,
-                now,
-            )));
-        }
-        cells.push(status_cell(&session.last_status));
+        let cells = columns
+            .iter()
+            .enumerate()
+            .map(|(column_index, column)| {
+                let width = table_column_width(area, &widths, column_index);
+                match column.key {
+                    SessionColumn::Marker => {
+                        let marker = if focused && index == selected {
+                            ">"
+                        } else {
+                            " "
+                        };
+                        Cell::from(Span::styled(marker, Style::default().fg(TEAL)))
+                    }
+                    SessionColumn::Id => {
+                        text_cell(display_session_id(session.session_id.as_deref()))
+                    }
+                    SessionColumn::Project => {
+                        text_cell(ellipsize(session.project.as_deref().unwrap_or("-"), width))
+                    }
+                    SessionColumn::Active => number_cell(session.active_count.to_string()),
+                    SessionColumn::Requests => number_cell(session.request_count.to_string()),
+                    SessionColumn::Failures => number_cell(session.failure_count.to_string()),
+                    SessionColumn::Counts => number_cell(format!(
+                        "{}/{}/{}",
+                        session.active_count, session.request_count, session.failure_count
+                    )),
+                    SessionColumn::Provider => provider_cell(session.provider.as_deref()),
+                    SessionColumn::Model => model_cell(session.model.as_deref(), width),
+                    SessionColumn::Target => {
+                        target_cell(session.provider.as_deref(), session.model.as_deref(), width)
+                    }
+                    SessionColumn::Effort => text_cell(session.effort.as_deref().unwrap_or("-")),
+                    SessionColumn::Input => number_cell(compact_tokens(session.input_tokens)),
+                    SessionColumn::Output => number_cell(compact_tokens(session.output_tokens)),
+                    SessionColumn::Rate => rate_cell(session.rate().label()),
+                    SessionColumn::Activity => Cell::from(token_sparkline_line(
+                        &session.output_token_samples,
+                        width,
+                        now,
+                    )),
+                    SessionColumn::Status => status_cell(&session.last_status),
+                }
+            })
+            .collect::<Vec<_>>();
         Row::new(cells).style(if index == selected {
             Style::default().bg(SELECTED_BG)
         } else {
             Style::default().bg(PANEL_BG)
         })
     });
-    let headers: &[(&str, Alignment)] = if show_sparkline {
-        &SESSION_WIDE_TABLE_HEADERS
-    } else if show_full_provider {
-        &SESSION_FULL_TABLE_HEADERS
-    } else {
-        &SESSION_TABLE_HEADERS
-    };
-    let table = Table::new(rows, widths)
-        .header(table_header_aligned(headers.iter().copied()))
+    let table = Table::new(rows, widths.clone())
+        .header(column_header(&columns))
         .block(panel("Sessions", focused));
     frame.render_widget(table, area);
 }
 
-fn active_table_widths(active: &[ActiveRequest]) -> Vec<Constraint> {
-    let provider_width = table_value_width(
-        "Provider",
-        active
-            .iter()
-            .map(|request| request.provider.as_deref().unwrap_or("-").to_string()),
-        10,
-    );
-    let effort_width = table_value_width(
-        "Effort",
-        active
-            .iter()
-            .map(|request| request.effort.as_deref().unwrap_or("-").to_string()),
-        7,
-    );
-    let endpoint_width = table_value_width(
-        "Endpoint",
-        active
-            .iter()
-            .map(|request| request.endpoint.label().to_string()),
-        12,
-    );
-    let status_width = table_value_width(
-        "Status",
-        active
-            .iter()
-            .map(|request| format!("{} {}", spinner(0), request.status.label())),
-        14,
-    );
-    let rate_width = table_value_width(
-        "Rate",
-        active.iter().map(|request| request.rate().label()),
-        12,
-    );
-    let elapsed_width = table_value_width(
-        "Elapsed",
-        active
-            .iter()
-            .map(|request| format_duration(request.elapsed())),
-        9,
-    );
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveColumn {
+    Started,
+    Status,
+    Project,
+    Session,
+    Provider,
+    Model,
+    Target,
+    Effort,
+    Endpoint,
+    Input,
+    Output,
+    Rate,
+    Elapsed,
+}
 
-    vec![
-        Constraint::Length(8),
-        Constraint::Length(provider_width),
-        Constraint::Length(MODEL_COLUMN_WIDTH),
-        Constraint::Length(effort_width),
-        Constraint::Length(endpoint_width),
-        Constraint::Length(status_width),
-        Constraint::Length(rate_width),
-        Constraint::Length(elapsed_width),
-        Constraint::Fill(1),
-    ]
+fn active_columns(tier: LayoutTier) -> Vec<ColumnSpec<ActiveColumn>> {
+    use ActiveColumn as C;
+    match tier {
+        LayoutTier::Wide => vec![
+            ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
+            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_WIDE_WIDTH),
+            ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, MODEL_WIDE_WIDTH),
+            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
+            ColumnSpec::flex(C::Endpoint, "Endpoint", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
+        ],
+        LayoutTier::Medium => vec![
+            ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
+            ColumnSpec::fixed(C::Endpoint, "Endpoint", Alignment::Left, ENDPOINT_WIDTH),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
+        ],
+        LayoutTier::Narrow => vec![
+            ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
+            ColumnSpec::flex(C::Target, "Target", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
+        ],
+        LayoutTier::Emergency => vec![
+            ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
+            ColumnSpec::flex(C::Target, "Target", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
+        ],
+    }
 }
 
 fn render_active(
@@ -1052,34 +942,126 @@ fn render_active(
         return;
     }
 
-    let widths = active_table_widths(active);
-    let model_width = table_column_width(area, &widths, 2);
+    let columns = active_columns(LayoutTier::for_outer_width(area.width));
+    let widths = column_constraints(&columns);
     let rows = active.iter().map(|request| {
-        let status = if matches!(
-            request.status.label(),
-            "upstream" | "streaming" | "selected" | "started"
-        ) {
-            format!("{} {}", spinner(tick), request.status.label())
-        } else {
-            request.status.label().to_string()
-        };
-        Row::new(vec![
-            muted_cell(format_system_time(request.started_at)),
-            provider_cell(request.provider.as_deref()),
-            model_cell(request.model.as_deref(), model_width),
-            text_cell(request.effort.as_deref().unwrap_or("-")),
-            muted_cell(request.endpoint.label()),
-            Cell::from(Span::styled(status, status_style(request.status.label()))),
-            rate_cell(request.rate().label()),
-            number_cell(format_duration(request.elapsed())),
-            muted_cell(""),
-        ])
-        .style(Style::default().bg(PANEL_BG))
+        let status = format!("{} {}", spinner(tick), request.status.label());
+        let cells = columns
+            .iter()
+            .enumerate()
+            .map(|(column_index, column)| {
+                let width = table_column_width(area, &widths, column_index);
+                match column.key {
+                    ActiveColumn::Started => muted_cell(format_system_time(request.started_at)),
+                    ActiveColumn::Status => Cell::from(Span::styled(
+                        status.clone(),
+                        status_style(request.status.label()),
+                    )),
+                    ActiveColumn::Project => {
+                        text_cell(ellipsize(request.project.as_deref().unwrap_or("-"), width))
+                    }
+                    ActiveColumn::Session => {
+                        text_cell(display_session_id(request.session_id.as_deref()))
+                    }
+                    ActiveColumn::Provider => provider_cell(request.provider.as_deref()),
+                    ActiveColumn::Model => model_cell(request.model.as_deref(), width),
+                    ActiveColumn::Target => {
+                        target_cell(request.provider.as_deref(), request.model.as_deref(), width)
+                    }
+                    ActiveColumn::Effort => text_cell(request.effort.as_deref().unwrap_or("-")),
+                    ActiveColumn::Endpoint => muted_cell(request.endpoint.label()),
+                    ActiveColumn::Input => number_cell(token_value(request.input_tokens)),
+                    ActiveColumn::Output => number_cell(token_value(request.output_tokens)),
+                    ActiveColumn::Rate => rate_cell(request.rate().label()),
+                    ActiveColumn::Elapsed => number_cell(format_duration(request.elapsed())),
+                }
+            })
+            .collect::<Vec<_>>();
+        Row::new(cells).style(Style::default().bg(PANEL_BG))
     });
-    let table = Table::new(rows, widths)
-        .header(table_header_aligned(ACTIVE_TABLE_HEADERS))
+    let table = Table::new(rows, widths.clone())
+        .header(column_header(&columns))
         .block(panel("Active requests", false));
     frame.render_widget(table, area);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecentColumn {
+    Finished,
+    Code,
+    Project,
+    Session,
+    Provider,
+    Model,
+    Target,
+    Effort,
+    Endpoint,
+    Latency,
+    Rate,
+    Input,
+    Output,
+    Details,
+    Error,
+}
+
+fn recent_columns(tier: LayoutTier) -> Vec<ColumnSpec<RecentColumn>> {
+    use RecentColumn as C;
+    match tier {
+        LayoutTier::Wide => vec![
+            ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
+            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_WIDE_WIDTH),
+            ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, MODEL_WIDE_WIDTH),
+            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
+            ColumnSpec::fixed(C::Endpoint, "Endpoint", Alignment::Left, ENDPOINT_WIDTH),
+            ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::flex(C::Details, "Details", Alignment::Left, 1),
+        ],
+        LayoutTier::Medium => vec![
+            ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
+            ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::fixed(C::Error, "!", Alignment::Right, ERROR_WIDTH),
+        ],
+        LayoutTier::Narrow => vec![
+            ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
+            ColumnSpec::flex(C::Target, "Target", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Error, "!", Alignment::Right, ERROR_WIDTH),
+        ],
+        LayoutTier::Emergency => vec![
+            ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
+            ColumnSpec::flex(C::Target, "Target", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
+            ColumnSpec::fixed(C::Error, "!", Alignment::Right, ERROR_WIDTH),
+        ],
+    }
+}
+
+fn http_code_cell(status: Option<u16>) -> Cell<'static> {
+    Cell::from(
+        Line::from(Span::styled(
+            status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            http_status_style(status),
+        ))
+        .alignment(Alignment::Right),
+    )
 }
 
 fn render_recent(
@@ -1100,74 +1082,94 @@ fn render_recent(
         return;
     }
 
-    let show_detail = area.width >= RECENT_DETAIL_WIDTH;
-    let widths = if show_detail {
-        vec![
-            Constraint::Length(8),
-            Constraint::Length(6),
-            Constraint::Length(8),
-            Constraint::Length(MODEL_COLUMN_WIDTH),
-            Constraint::Length(7),
-            Constraint::Length(8),
-            Constraint::Length(12),
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Fill(1),
-        ]
-    } else {
-        vec![
-            Constraint::Length(8),
-            Constraint::Length(6),
-            Constraint::Length(8),
-            Constraint::Length(if area.width >= 105 { 18 } else { 12 }),
-            Constraint::Length(7),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Length(3),
-        ]
-    };
-    let model_width = table_column_width(area, &widths, 3);
+    let columns = recent_columns(LayoutTier::for_outer_width(area.width));
+    let widths = column_constraints(&columns);
     let rows = recent.iter().enumerate().map(|(index, request)| {
-        let detail = if show_detail {
-            request.error.as_deref().unwrap_or("")
-        } else {
-            error_indicator(request)
-        };
-        Row::new(vec![
-            muted_cell(format_system_time(request.finished_at)),
-            Cell::from(Span::styled(
-                request
-                    .http_status
-                    .map(|status| status.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                http_status_style(request.http_status),
-            )),
-            provider_cell(request.provider.as_deref()),
-            model_cell(request.model.as_deref(), model_width),
-            text_cell(request.effort.as_deref().unwrap_or("-")),
-            number_cell(format_duration(request.latency)),
-            rate_cell(request.rate().label()),
-            number_cell(token_value(request.input_tokens)),
-            number_cell(token_value(request.output_tokens)),
-            detail_cell(detail),
-        ])
-        .style(if focused && index == selected {
+        let cells = columns
+            .iter()
+            .enumerate()
+            .map(|(column_index, column)| {
+                let width = table_column_width(area, &widths, column_index);
+                match column.key {
+                    RecentColumn::Finished => muted_cell(format_system_time(request.finished_at)),
+                    RecentColumn::Code => http_code_cell(request.http_status),
+                    RecentColumn::Project => {
+                        text_cell(ellipsize(request.project.as_deref().unwrap_or("-"), width))
+                    }
+                    RecentColumn::Session => {
+                        text_cell(display_session_id(request.session_id.as_deref()))
+                    }
+                    RecentColumn::Provider => provider_cell(request.provider.as_deref()),
+                    RecentColumn::Model => model_cell(request.model.as_deref(), width),
+                    RecentColumn::Target => {
+                        target_cell(request.provider.as_deref(), request.model.as_deref(), width)
+                    }
+                    RecentColumn::Effort => text_cell(request.effort.as_deref().unwrap_or("-")),
+                    RecentColumn::Endpoint => muted_cell(request.endpoint.label()),
+                    RecentColumn::Latency => number_cell(format_duration(request.latency)),
+                    RecentColumn::Rate => rate_cell(request.rate().label()),
+                    RecentColumn::Input => number_cell(token_value(request.input_tokens)),
+                    RecentColumn::Output => number_cell(token_value(request.output_tokens)),
+                    RecentColumn::Details => detail_cell(request.error.as_deref().unwrap_or("")),
+                    RecentColumn::Error => detail_cell(error_indicator(request)),
+                }
+            })
+            .collect::<Vec<_>>();
+        Row::new(cells).style(if focused && index == selected {
             Style::default().bg(SELECTED_BG)
         } else {
             Style::default().bg(PANEL_BG)
         })
     });
-    let headers = if show_detail {
-        RECENT_TABLE_HEADERS
-    } else {
-        RECENT_INDICATOR_TABLE_HEADERS
-    };
-    let table = Table::new(rows, widths)
-        .header(table_header_aligned(headers))
+    let table = Table::new(rows, widths.clone())
+        .header(column_header(&columns))
         .block(panel("Recent requests", focused));
     frame.render_widget(table, area);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EventColumn {
+    Time,
+    Code,
+    Project,
+    Session,
+    Provider,
+    Model,
+    Target,
+    Message,
+}
+
+fn event_columns(tier: LayoutTier) -> Vec<ColumnSpec<EventColumn>> {
+    use EventColumn as C;
+    match tier {
+        LayoutTier::Wide => vec![
+            ColumnSpec::fixed(C::Time, "Time", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
+            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_WIDE_WIDTH),
+            ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, MODEL_WIDE_WIDTH),
+            ColumnSpec::flex(C::Message, "Message", Alignment::Left, 1),
+        ],
+        LayoutTier::Medium => vec![
+            ColumnSpec::fixed(C::Time, "Time", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, MODEL_MEDIUM_WIDTH),
+            ColumnSpec::flex(C::Message, "Message", Alignment::Left, 1),
+        ],
+        LayoutTier::Narrow => vec![
+            ColumnSpec::fixed(C::Time, "Time", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
+            ColumnSpec::fixed(C::Target, "Target", Alignment::Left, MODEL_NARROW_WIDTH),
+            ColumnSpec::flex(C::Message, "Message", Alignment::Left, 1),
+        ],
+        LayoutTier::Emergency => vec![
+            ColumnSpec::fixed(C::Time, "Time", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
+            ColumnSpec::flex(C::Message, "Message", Alignment::Left, 1),
+        ],
+    }
 }
 
 fn render_events(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[CompletedRequest]) {
@@ -1185,35 +1187,41 @@ fn render_events(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
         return;
     }
 
-    let widths = [
-        Constraint::Length(8),
-        Constraint::Length(6),
-        Constraint::Length(10),
-        Constraint::Min(18),
-        Constraint::Percentage(50),
-    ];
-    let model_width = table_column_width(area, &widths, 3);
+    let columns = event_columns(LayoutTier::for_outer_width(area.width));
+    let widths = column_constraints(&columns);
     let rows = events.iter().map(|request| {
-        let status = request
-            .http_status
-            .map(|status| status.to_string())
-            .unwrap_or_else(|| request.status.label().to_string());
         let message = request
             .error
             .as_deref()
             .filter(|error| !error.is_empty())
             .unwrap_or("-");
-        Row::new(vec![
-            muted_cell(format_system_time(request.finished_at)),
-            Cell::from(Span::styled(status, http_status_style(request.http_status))),
-            provider_cell(request.provider.as_deref()),
-            model_cell(request.model.as_deref(), model_width),
-            detail_cell(message),
-        ])
-        .style(Style::default().bg(PANEL_BG))
+        let cells = columns
+            .iter()
+            .enumerate()
+            .map(|(column_index, column)| {
+                let width = table_column_width(area, &widths, column_index);
+                match column.key {
+                    EventColumn::Time => muted_cell(format_system_time(request.finished_at)),
+                    EventColumn::Code => http_code_cell(request.http_status),
+                    EventColumn::Project => {
+                        text_cell(ellipsize(request.project.as_deref().unwrap_or("-"), width))
+                    }
+                    EventColumn::Session => {
+                        text_cell(display_session_id(request.session_id.as_deref()))
+                    }
+                    EventColumn::Provider => provider_cell(request.provider.as_deref()),
+                    EventColumn::Model => model_cell(request.model.as_deref(), width),
+                    EventColumn::Target => {
+                        target_cell(request.provider.as_deref(), request.model.as_deref(), width)
+                    }
+                    EventColumn::Message => detail_cell(message),
+                }
+            })
+            .collect::<Vec<_>>();
+        Row::new(cells).style(Style::default().bg(PANEL_BG))
     });
-    let table = Table::new(rows, widths)
-        .header(table_header_aligned(EVENTS_TABLE_HEADERS))
+    let table = Table::new(rows, widths.clone())
+        .header(column_header(&columns))
         .block(panel("Events", false));
     frame.render_widget(table, area);
 }
@@ -1641,10 +1649,43 @@ mod tests {
         assert!(left_space.abs_diff(right_space) <= 1);
     }
 
-    fn table_header_labels<'a, const N: usize>(
-        headers: &'a [(&'a str, Alignment); N],
-    ) -> [&'a str; N] {
-        headers.map(|(label, _)| label)
+    fn headers<K>(columns: &[ColumnSpec<K>]) -> Vec<&'static str> {
+        columns.iter().map(|column| column.header).collect()
+    }
+
+    fn fixed_budget<K>(columns: &[ColumnSpec<K>]) -> u16 {
+        let widths = columns
+            .iter()
+            .map(|column| match column.width {
+                layout::ColumnWidth::Fixed(width) => width,
+                layout::ColumnWidth::Flex(_) => 0,
+            })
+            .sum::<u16>();
+        widths.saturating_add(columns.len().saturating_sub(1) as u16)
+    }
+
+    fn fixed_width<K: Copy + PartialEq>(columns: &[ColumnSpec<K>], key: K) -> Option<u16> {
+        columns
+            .iter()
+            .find(|column| column.key == key)
+            .and_then(|column| match column.width {
+                layout::ColumnWidth::Fixed(width) => Some(width),
+                layout::ColumnWidth::Flex(_) => None,
+            })
+    }
+
+    fn flex_count<K>(columns: &[ColumnSpec<K>]) -> usize {
+        columns
+            .iter()
+            .filter(|column| matches!(column.width, layout::ColumnWidth::Flex(_)))
+            .count()
+    }
+
+    fn alignment<K: Copy + PartialEq>(columns: &[ColumnSpec<K>], key: K) -> Option<Alignment> {
+        columns
+            .iter()
+            .find(|column| column.key == key)
+            .map(|column| column.alignment)
     }
 
     #[test]
@@ -1656,67 +1697,216 @@ mod tests {
     }
 
     #[test]
-    fn table_headers_use_expected_labels() {
+    fn request_tables_share_time_status_provider_model_rhythm() {
         assert_eq!(
-            table_header_labels(&SESSION_TABLE_HEADERS),
-            [
-                "", "ID", "Project", "A", "R", "F", "Prov", "Model", "Effort", "In", "Out", "Rate",
-                "Status",
-            ]
+            headers(&active_columns(LayoutTier::Medium))[..4],
+            ["Started", "Status", "Provider", "Model"]
         );
         assert_eq!(
-            table_header_labels(&SESSION_FULL_TABLE_HEADERS),
-            [
-                "", "ID", "Project", "A", "R", "F", "Provider", "Model", "Effort", "In", "Out",
-                "Rate", "Status",
-            ]
+            headers(&recent_columns(LayoutTier::Medium))[..4],
+            ["Finished", "Code", "Provider", "Model"]
         );
         assert_eq!(
-            table_header_labels(&SESSION_WIDE_TABLE_HEADERS),
-            [
-                "",
-                "ID",
-                "Project",
-                "A",
-                "R",
-                "F",
-                "Provider",
-                "Model",
-                "Effort",
-                "In",
-                "Out",
-                "Rate",
-                "Tokens/10s · 4k",
-                "Status",
-            ]
+            headers(&event_columns(LayoutTier::Medium))[..4],
+            ["Time", "Code", "Provider", "Model"]
+        );
+    }
+
+    #[test]
+    fn wide_tables_use_shared_model_and_provider_widths() {
+        let sessions = session_columns(LayoutTier::Wide, true);
+        let active = active_columns(LayoutTier::Wide);
+        let recent = recent_columns(LayoutTier::Wide);
+        let events = event_columns(LayoutTier::Wide);
+
+        assert_eq!(
+            fixed_width(&sessions, SessionColumn::Model),
+            Some(MODEL_WIDE_WIDTH)
         );
         assert_eq!(
-            table_header_labels(&ACTIVE_TABLE_HEADERS),
-            [
-                "Started", "Provider", "Model", "Effort", "Endpoint", "Status", "Rate", "Elapsed",
-                "",
-            ]
+            fixed_width(&active, ActiveColumn::Model),
+            Some(MODEL_WIDE_WIDTH)
         );
         assert_eq!(
-            table_header_labels(&RECENT_TABLE_HEADERS),
-            [
-                "Finished", "Status", "Provider", "Model", "Effort", "Latency", "Rate", "In",
-                "Out", "Details",
-            ]
+            fixed_width(&recent, RecentColumn::Model),
+            Some(MODEL_WIDE_WIDTH)
         );
         assert_eq!(
-            table_header_labels(&RECENT_INDICATOR_TABLE_HEADERS),
-            [
-                "Finished", "Status", "Provider", "Model", "Effort", "Latency", "Rate", "In",
-                "Out", "Err",
-            ]
+            fixed_width(&events, EventColumn::Model),
+            Some(MODEL_WIDE_WIDTH)
         );
         assert_eq!(
-            table_header_labels(&EVENTS_TABLE_HEADERS),
-            ["Time", "Status", "Provider", "Model", "Message"]
+            fixed_width(&active, ActiveColumn::Provider),
+            Some(PROVIDER_WIDTH)
         );
-        assert_eq!(ACTIVE_TABLE_HEADERS[6], ("Rate", Alignment::Right));
-        assert_eq!(RECENT_TABLE_HEADERS[6], ("Rate", Alignment::Right));
+        assert_eq!(
+            fixed_width(&recent, RecentColumn::Provider),
+            Some(PROVIDER_WIDTH)
+        );
+    }
+
+    #[test]
+    fn responsive_schemas_fit_their_minimum_terminal_widths() {
+        assert!(fixed_budget(&session_columns(LayoutTier::Emergency, false)) <= 75);
+        assert!(fixed_budget(&session_columns(LayoutTier::Narrow, false)) <= 76);
+        assert!(fixed_budget(&session_columns(LayoutTier::Medium, false)) <= 98);
+        assert!(fixed_budget(&session_columns(LayoutTier::Wide, true)) <= 168);
+
+        assert!(fixed_budget(&active_columns(LayoutTier::Emergency)) <= 75);
+        assert!(fixed_budget(&active_columns(LayoutTier::Narrow)) <= 76);
+        assert!(fixed_budget(&active_columns(LayoutTier::Medium)) <= 98);
+        assert!(fixed_budget(&active_columns(LayoutTier::Wide)) <= 158);
+
+        assert!(fixed_budget(&recent_columns(LayoutTier::Emergency)) <= 75);
+        assert!(fixed_budget(&recent_columns(LayoutTier::Narrow)) <= 76);
+        assert!(fixed_budget(&recent_columns(LayoutTier::Medium)) <= 98);
+        assert!(fixed_budget(&recent_columns(LayoutTier::Wide)) <= 158);
+
+        assert!(fixed_budget(&event_columns(LayoutTier::Emergency)) <= 75);
+        assert!(fixed_budget(&event_columns(LayoutTier::Narrow)) <= 76);
+        assert!(fixed_budget(&event_columns(LayoutTier::Medium)) <= 98);
+        assert!(fixed_budget(&event_columns(LayoutTier::Wide)) <= 158);
+    }
+
+    #[test]
+    fn active_table_renders_expected_headers_at_tier_boundaries() {
+        let state = mock_state();
+        let render_at = |width| {
+            let buffer = draw(width, 8, |frame| {
+                render_active(frame, frame.area(), &state.active, 0)
+            });
+            buffer_text(&buffer)
+        };
+
+        let emergency = render_at(77);
+        assert!(emergency.contains("Started"), "{emergency}");
+        assert!(emergency.contains("Target"), "{emergency}");
+        assert!(!emergency.contains("Rate"), "{emergency}");
+
+        let narrow = render_at(78);
+        assert!(narrow.contains("Target"), "{narrow}");
+        assert!(narrow.contains("Rate"), "{narrow}");
+        assert!(!narrow.contains("Provider"), "{narrow}");
+
+        let medium = render_at(100);
+        assert!(medium.contains("Provider"), "{medium}");
+        assert!(medium.contains("Model"), "{medium}");
+        assert!(medium.contains("Endpoint"), "{medium}");
+        assert!(!medium.contains("Project"), "{medium}");
+
+        let wide = render_at(160);
+        assert!(wide.contains("Project"), "{wide}");
+        assert!(wide.contains("Session"), "{wide}");
+        assert!(wide.contains("In"), "{wide}");
+        assert!(wide.contains("Out"), "{wide}");
+    }
+
+    #[test]
+    fn each_schema_has_one_meaningful_flexible_column() {
+        for tier in [
+            LayoutTier::Emergency,
+            LayoutTier::Narrow,
+            LayoutTier::Medium,
+            LayoutTier::Wide,
+        ] {
+            let sessions = session_columns(tier, tier == LayoutTier::Wide);
+            let active = active_columns(tier);
+            let recent = recent_columns(tier);
+            let events = event_columns(tier);
+
+            assert_eq!(flex_count(&sessions), 1);
+            assert_eq!(flex_count(&active), 1);
+            assert_eq!(flex_count(&recent), 1);
+            assert_eq!(flex_count(&events), 1);
+            assert_eq!(
+                sessions
+                    .iter()
+                    .filter(|column| column.header.is_empty())
+                    .count(),
+                1
+            );
+            assert!(active.iter().all(|column| !column.header.is_empty()));
+            assert!(recent.iter().all(|column| !column.header.is_empty()));
+            assert!(events.iter().all(|column| !column.header.is_empty()));
+        }
+    }
+
+    #[test]
+    fn metric_columns_are_right_aligned() {
+        let sessions = session_columns(LayoutTier::Wide, true);
+        for key in [
+            SessionColumn::Active,
+            SessionColumn::Requests,
+            SessionColumn::Failures,
+            SessionColumn::Input,
+            SessionColumn::Output,
+            SessionColumn::Rate,
+        ] {
+            assert_eq!(alignment(&sessions, key), Some(Alignment::Right));
+        }
+
+        let active = active_columns(LayoutTier::Wide);
+        for key in [
+            ActiveColumn::Input,
+            ActiveColumn::Output,
+            ActiveColumn::Rate,
+            ActiveColumn::Elapsed,
+        ] {
+            assert_eq!(alignment(&active, key), Some(Alignment::Right));
+        }
+
+        let recent = recent_columns(LayoutTier::Wide);
+        for key in [
+            RecentColumn::Code,
+            RecentColumn::Latency,
+            RecentColumn::Rate,
+            RecentColumn::Input,
+            RecentColumn::Output,
+        ] {
+            assert_eq!(alignment(&recent, key), Some(Alignment::Right));
+        }
+    }
+
+    #[test]
+    fn narrow_schemas_drop_optional_columns_instead_of_shrinking_metrics() {
+        let sessions = session_columns(LayoutTier::Narrow, false);
+        assert!(
+            !sessions
+                .iter()
+                .any(|column| column.key == SessionColumn::Project)
+        );
+        assert!(
+            sessions
+                .iter()
+                .any(|column| column.key == SessionColumn::Target)
+        );
+
+        let active = active_columns(LayoutTier::Narrow);
+        assert!(
+            !active
+                .iter()
+                .any(|column| column.key == ActiveColumn::Effort)
+        );
+        assert!(
+            active
+                .iter()
+                .any(|column| column.key == ActiveColumn::Target)
+        );
+
+        let recent = recent_columns(LayoutTier::Narrow);
+        assert!(
+            !recent
+                .iter()
+                .any(|column| column.key == RecentColumn::Effort)
+        );
+        assert!(
+            recent
+                .iter()
+                .any(|column| column.key == RecentColumn::Error)
+        );
+
+        let events = event_columns(LayoutTier::Emergency);
+        assert_eq!(headers(&events), ["Time", "Code", "Message"]);
     }
 
     #[test]
@@ -1732,79 +1922,6 @@ mod tests {
         assert_eq!(display_session_id(Some("custom-session")), "custom-session");
         assert_eq!(display_session_id(Some("")), "no-session");
         assert_eq!(display_session_id(None), "no-session");
-    }
-
-    #[test]
-    fn recent_rate_column_keeps_full_width() {
-        let widths = [
-            Constraint::Length(8),
-            Constraint::Length(6),
-            Constraint::Length(8),
-            Constraint::Length(MODEL_COLUMN_WIDTH),
-            Constraint::Length(7),
-            Constraint::Length(8),
-            Constraint::Length(12),
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Fill(1),
-        ];
-
-        assert_eq!(table_column_width(Rect::new(0, 0, 90, 10), &widths, 6), 12);
-        assert_eq!(table_column_width(Rect::new(0, 0, 90, 10), &widths, 7), 7);
-        assert_eq!(table_column_width(Rect::new(0, 0, 90, 10), &widths, 8), 7);
-        assert_eq!(
-            table_column_width(Rect::new(0, 0, 200, 10), &widths, 3),
-            usize::from(MODEL_COLUMN_WIDTH)
-        );
-        assert!(
-            usize::from(MODEL_COLUMN_WIDTH) >= "claude-sonnet-4-6 → gpt-5.6-terra".chars().count()
-        );
-    }
-
-    #[test]
-    fn session_columns_fit_displayed_content_before_allocating_flexible_space() {
-        let state = mock_state();
-        let compact = session_table_widths(&state.sessions, false, false);
-        let area = Rect::new(0, 0, 120, 10);
-
-        assert_eq!(table_column_width(area, &compact, 2), 18);
-        assert_eq!(table_column_width(area, &compact, 3), 1);
-        assert_eq!(table_column_width(area, &compact, 4), 1);
-        assert_eq!(table_column_width(area, &compact, 5), 1);
-        assert_eq!(table_column_width(area, &compact, 6), 6);
-        assert!(table_column_width(area, &compact, 9) <= 6);
-        assert!(table_column_width(area, &compact, 10) <= 4);
-        assert!(table_column_width(area, &compact, 7) >= 10);
-
-        let full_provider = session_table_widths(&state.sessions, false, true);
-        assert!(table_column_width(area, &full_provider, 7) >= 18);
-        assert!(table_column_width(Rect::new(0, 0, 90, 10), &full_provider, 7) < 18);
-
-        let wide = session_table_widths(&state.sessions, true, true);
-        let wide_area = Rect::new(0, 0, 200, 10);
-        assert_eq!(
-            table_column_width(wide_area, &wide, 7),
-            usize::from(MODEL_COLUMN_WIDTH)
-        );
-        assert!(table_column_width(wide_area, &wide, 12) >= 20);
-    }
-
-    #[test]
-    fn active_model_matches_shared_width_and_leaves_extra_space_at_the_end() {
-        let state = mock_state();
-        let widths = active_table_widths(&state.active);
-        let narrow_area = Rect::new(0, 0, 110, 10);
-        let wide_area = Rect::new(0, 0, 212, 10);
-        let narrow_model = table_column_width(narrow_area, &widths, 2);
-        let wide_model = table_column_width(wide_area, &widths, 2);
-        let narrow_spacer = table_column_width(narrow_area, &widths, 8);
-        let wide_spacer = table_column_width(wide_area, &widths, 8);
-
-        assert!(narrow_model <= usize::from(MODEL_COLUMN_WIDTH));
-        assert_eq!(wide_model, usize::from(MODEL_COLUMN_WIDTH));
-        assert_eq!(table_column_width(wide_area, &widths, 3), 6);
-        assert_eq!(table_column_width(wide_area, &widths, 4), 12);
-        assert!(wide_spacer > narrow_spacer);
     }
 
     #[test]
@@ -1967,11 +2084,11 @@ mod tests {
         );
         let active_state = monitor.snapshot();
 
-        let sessions = draw(160, 8, |frame| {
+        let sessions = draw(170, 8, |frame| {
             render_sessions(frame, frame.area(), &active_state.sessions, 0, true)
         });
         let sessions_text = buffer_text(&sessions);
-        assert!(sessions_text.contains("Prov"));
+        assert!(sessions_text.contains("Provider"));
         assert!(sessions_text.contains("Project"));
         assert!(sessions_text.contains("example-project"));
         assert!(sessions_text.contains("sess-1"));
@@ -2061,7 +2178,6 @@ mod tests {
         });
         let recent_text = buffer_text(&recent);
 
-        assert!(recent_text.contains("Err"), "{recent_text}");
         assert!(recent_text.contains("!"), "{recent_text}");
         assert!(!recent_text.contains("Details"), "{recent_text}");
         assert!(
@@ -2078,7 +2194,7 @@ mod tests {
         monitor.request_failed("request-1", Some(502), "upstream unavailable");
         let state = monitor.snapshot();
 
-        let recent = draw(150, 8, |frame| {
+        let recent = draw(180, 8, |frame| {
             render_recent(frame, frame.area(), &state.recent, 0, false)
         });
         let recent_text = buffer_text(&recent);
