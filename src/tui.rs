@@ -42,9 +42,7 @@ const RED: Color = Color::Rgb(220, 120, 120);
 const YELLOW: Color = Color::Rgb(220, 200, 100);
 const BLUE: Color = Color::Rgb(120, 170, 230);
 const DIM: Color = Color::Rgb(100, 104, 114);
-const ACTIVE_MODEL_WIDTH: u16 = 40;
-const SESSION_MODEL_WIDTH: u16 = 36;
-const RECENT_MODEL_WIDTH: u16 = 36;
+const MODEL_COLUMN_WIDTH: u16 = 36;
 
 const SESSION_SPARKLINE_MIN_WIDTH: u16 = 170;
 const SESSION_SPARKLINE_MAX_TOKENS: u64 = 4_000;
@@ -898,7 +896,7 @@ fn session_table_widths(
         Constraint::Length(failure_width),
         Constraint::Length(provider_width),
         if show_sparkline {
-            Constraint::Length(SESSION_MODEL_WIDTH)
+            Constraint::Length(MODEL_COLUMN_WIDTH)
         } else {
             Constraint::Fill(1)
         },
@@ -930,7 +928,7 @@ fn render_sessions(
     let full_provider_widths = session_table_widths(sessions, show_sparkline, true);
     let show_full_provider = show_sparkline
         || table_column_width(area, &full_provider_widths, 7)
-            >= usize::from(SESSION_MODEL_WIDTH / 2);
+            >= usize::from(MODEL_COLUMN_WIDTH / 2);
     let widths = if show_full_provider {
         full_provider_widths
     } else {
@@ -996,13 +994,6 @@ fn active_table_widths(active: &[ActiveRequest]) -> Vec<Constraint> {
             .map(|request| request.provider.as_deref().unwrap_or("-").to_string()),
         10,
     );
-    let model_width = table_value_width(
-        "Model",
-        active
-            .iter()
-            .map(|request| request.model.as_deref().unwrap_or("-").to_string()),
-        ACTIVE_MODEL_WIDTH,
-    );
     let effort_width = table_value_width(
         "Effort",
         active
@@ -1040,7 +1031,7 @@ fn active_table_widths(active: &[ActiveRequest]) -> Vec<Constraint> {
     vec![
         Constraint::Length(8),
         Constraint::Length(provider_width),
-        Constraint::Length(model_width),
+        Constraint::Length(MODEL_COLUMN_WIDTH),
         Constraint::Length(effort_width),
         Constraint::Length(endpoint_width),
         Constraint::Length(status_width),
@@ -1115,7 +1106,7 @@ fn render_recent(
             Constraint::Length(8),
             Constraint::Length(6),
             Constraint::Length(8),
-            Constraint::Length(RECENT_MODEL_WIDTH),
+            Constraint::Length(MODEL_COLUMN_WIDTH),
             Constraint::Length(7),
             Constraint::Length(8),
             Constraint::Length(12),
@@ -1749,7 +1740,7 @@ mod tests {
             Constraint::Length(8),
             Constraint::Length(6),
             Constraint::Length(8),
-            Constraint::Length(RECENT_MODEL_WIDTH),
+            Constraint::Length(MODEL_COLUMN_WIDTH),
             Constraint::Length(7),
             Constraint::Length(8),
             Constraint::Length(12),
@@ -1763,10 +1754,10 @@ mod tests {
         assert_eq!(table_column_width(Rect::new(0, 0, 90, 10), &widths, 8), 7);
         assert_eq!(
             table_column_width(Rect::new(0, 0, 200, 10), &widths, 3),
-            usize::from(RECENT_MODEL_WIDTH)
+            usize::from(MODEL_COLUMN_WIDTH)
         );
         assert!(
-            usize::from(RECENT_MODEL_WIDTH) >= "claude-sonnet-4-6 → gpt-5.6-terra".chars().count()
+            usize::from(MODEL_COLUMN_WIDTH) >= "claude-sonnet-4-6 → gpt-5.6-terra".chars().count()
         );
     }
 
@@ -1793,13 +1784,13 @@ mod tests {
         let wide_area = Rect::new(0, 0, 200, 10);
         assert_eq!(
             table_column_width(wide_area, &wide, 7),
-            usize::from(SESSION_MODEL_WIDTH)
+            usize::from(MODEL_COLUMN_WIDTH)
         );
         assert!(table_column_width(wide_area, &wide, 12) >= 20);
     }
 
     #[test]
-    fn active_columns_fit_content_and_leave_extra_space_at_the_end() {
+    fn active_model_matches_shared_width_and_leaves_extra_space_at_the_end() {
         let state = mock_state();
         let widths = active_table_widths(&state.active);
         let narrow_area = Rect::new(0, 0, 110, 10);
@@ -1809,8 +1800,8 @@ mod tests {
         let narrow_spacer = table_column_width(narrow_area, &widths, 8);
         let wide_spacer = table_column_width(wide_area, &widths, 8);
 
-        assert!(narrow_model <= usize::from(ACTIVE_MODEL_WIDTH));
-        assert!(wide_model <= usize::from(ACTIVE_MODEL_WIDTH));
+        assert!(narrow_model <= usize::from(MODEL_COLUMN_WIDTH));
+        assert_eq!(wide_model, usize::from(MODEL_COLUMN_WIDTH));
         assert_eq!(table_column_width(wide_area, &widths, 3), 6);
         assert_eq!(table_column_width(wide_area, &widths, 4), 12);
         assert!(wide_spacer > narrow_spacer);
@@ -2023,7 +2014,9 @@ mod tests {
             selected: 0,
             recent_selected: 0,
             tick: 0,
+            phase: MonitorPhase::Running,
             shutdown: None,
+            shutdown_complete: None,
         };
 
         let buffer = draw(180, 48, |frame| render(frame, &mut app, &state));
