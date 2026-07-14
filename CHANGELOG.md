@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.1.18 (2026-07-15)
+
+- Codex preserves encrypted reasoning across turns, improving continuity when
+  conversation history is replayed. ([#52](https://github.com/raine/claude-code-proxy/pull/52))
+- The new `demo` command opens the interactive monitor with simulated traffic,
+  without starting a proxy server or requiring provider credentials.
+- Session rows show project names and output-token activity over time, making
+  concurrent sessions and usage bursts easier to identify.
+- Monitor tables adapt more consistently across terminal sizes and keep important
+  request details readable in compact layouts.
+- The monitor stays visible during graceful shutdown and shows progress until the
+  proxy finishes draining connections.
+
 ## v0.1.17 (2026-07-14)
 
 - The proxy can listen on a configurable IP address through `CCP_BIND_ADDRESS`
