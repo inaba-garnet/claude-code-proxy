@@ -96,15 +96,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_primary_working_directory_from_system_blocks() {
+    fn reads_primary_working_directory_from_claude_code_system_blocks() {
         let root = tempdir().unwrap();
         fs::create_dir(root.path().join(".git")).unwrap();
         let system = json!([
-            {"type": "text", "text": "instructions"},
-            {"type": "text", "text": format!(
-                "# Environment\n - Primary working directory: {}\n - Platform: linux",
-                root.path().display()
-            )}
+            {
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.177.45c"
+            },
+            {
+                "type": "text",
+                "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                "cache_control": {"type": "ephemeral"}
+            },
+            {
+                "type": "text",
+                "text": format!(
+                    "\nYou are an interactive agent.\n\n# Environment\nYou have been invoked in the following environment: \n - Primary working directory: {}\n - Is a git repository: true",
+                    root.path().display()
+                ),
+                "cache_control": {"type": "ephemeral"}
+            }
         ]);
 
         assert_eq!(

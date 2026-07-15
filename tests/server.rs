@@ -266,8 +266,9 @@ async fn monitor_records_successful_request_events() {
                 .method(Method::POST)
                 .uri("/v1/messages/count_tokens")
                 .header("content-type", "application/json")
+                .header("x-claude-code-session-id", "project-session")
                 .body(body_string(
-                    r##"{"model":"gpt-5.4","messages":[{"role":"user","content":[{"type":"text","text":"hello"},{"type":"text","text":"<system-reminder>\n# Environment\n - Primary working directory: /projects/example\n</system-reminder>"}]}],"output_config":{"effort":"high"}}"##,
+                    r##"{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.177.45c"},{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK.","cache_control":{"type":"ephemeral"}},{"type":"text","text":"\nYou are an interactive agent.\n\n# Environment\nYou have been invoked in the following environment: \n - Primary working directory: /projects/example\n - Is a git repository: true","cache_control":{"type":"ephemeral"}}],"output_config":{"effort":"high"}}"##,
                 ))
                 .unwrap(),
         )
@@ -287,6 +288,11 @@ async fn monitor_records_successful_request_events() {
     assert_eq!(state.recent.len(), 1);
     assert_eq!(state.recent[0].status, RequestStatus::Completed);
     assert_eq!(state.recent[0].http_status, Some(200));
+    assert_eq!(
+        state.recent[0].session_id.as_deref(),
+        Some("project-session")
+    );
+    assert!(state.recent[0].session_seq.is_some());
     assert_eq!(state.recent[0].project.as_deref(), Some("example"));
     assert_eq!(state.sessions[0].project.as_deref(), Some("example"));
     assert_eq!(state.recent[0].provider.as_deref(), Some("codex"));

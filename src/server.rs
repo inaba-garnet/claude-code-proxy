@@ -385,7 +385,7 @@ async fn dispatch_request(
     );
     if let Some(monitor) = state.monitor.as_ref() {
         if let Some(current) = current.as_ref() {
-            monitor.request_started(&req_id, session_id.clone(), Some(current.seq), endpoint);
+            monitor.session_sequence_resolved(&req_id, current.seq);
         }
         monitor.provider_selected(&req_id, provider.name(), &normalized_model, effort);
     }

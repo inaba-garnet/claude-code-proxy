@@ -62,6 +62,10 @@ pub enum MonitorEvent {
         request_id: String,
         project: String,
     },
+    SessionSequenceResolved {
+        request_id: String,
+        session_seq: u64,
+    },
     ProviderSelected {
         request_id: String,
         provider: String,
@@ -332,6 +336,13 @@ impl MonitorHandle {
         });
     }
 
+    pub fn session_sequence_resolved(&self, request_id: impl Into<String>, session_seq: u64) {
+        self.publish(MonitorEvent::SessionSequenceResolved {
+            request_id: request_id.into(),
+            session_seq,
+        });
+    }
+
     pub fn provider_selected(
         &self,
         request_id: impl Into<String>,
@@ -482,6 +493,14 @@ impl MonitorStore {
             } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
                     active.project = Some(project);
+                }
+            }
+            MonitorEvent::SessionSequenceResolved {
+                request_id,
+                session_seq,
+            } => {
+                if let Some(active) = self.active.get_mut(&request_id) {
+                    active.session_seq = Some(session_seq);
                 }
             }
             MonitorEvent::ProviderSelected {
