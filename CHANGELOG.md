@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.21 (2026-07-15)
+
+- The monitor shows session token activity trends at common terminal widths,
+  making throughput history visible without an extra-wide window.
+
 ## v0.1.20 (2026-07-15)
 
 - The monitor reliably shows project names for Claude Code sessions and keeps
