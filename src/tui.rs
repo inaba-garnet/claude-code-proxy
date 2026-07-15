@@ -142,13 +142,22 @@ fn run_monitor_events(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) => match key.code {
-                    KeyCode::Char('q') => app.begin_shutdown(),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if app.handle_ctrl_c() {
                             return Ok(MonitorExit::ForceQuit);
                         }
                     }
                     _ if app.phase == MonitorPhase::ShuttingDown => {}
+                    KeyCode::Char('y') if app.phase == MonitorPhase::ConfirmingShutdown => {
+                        app.begin_shutdown()
+                    }
+                    KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q')
+                        if app.phase == MonitorPhase::ConfirmingShutdown =>
+                    {
+                        app.cancel_shutdown_confirmation()
+                    }
+                    _ if app.phase == MonitorPhase::ConfirmingShutdown => {}
+                    KeyCode::Char('q') => app.request_shutdown_confirmation(),
                     KeyCode::Char('?') => app.show_help = !app.show_help,
                     KeyCode::Char('b') => app.show_setup = !app.show_setup,
                     KeyCode::Tab => app.focus = app.focus.next(),
@@ -215,6 +224,7 @@ enum DetailView {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MonitorPhase {
     Running,
+    ConfirmingShutdown,
     ShuttingDown,
 }
 
@@ -240,6 +250,18 @@ impl MonitorApp {
         } else {
             self.begin_shutdown();
             false
+        }
+    }
+
+    fn request_shutdown_confirmation(&mut self) {
+        if self.phase == MonitorPhase::Running {
+            self.phase = MonitorPhase::ConfirmingShutdown;
+        }
+    }
+
+    fn cancel_shutdown_confirmation(&mut self) {
+        if self.phase == MonitorPhase::ConfirmingShutdown {
+            self.phase = MonitorPhase::Running;
         }
     }
 
@@ -387,8 +409,10 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
     if app.show_help {
         render_help_overlay(frame, area);
     }
-    if app.phase == MonitorPhase::ShuttingDown {
-        render_shutdown_overlay(frame, area, app.tick);
+    match app.phase {
+        MonitorPhase::Running => {}
+        MonitorPhase::ConfirmingShutdown => render_shutdown_confirmation(frame, area),
+        MonitorPhase::ShuttingDown => render_shutdown_overlay(frame, area, app.tick),
     }
 }
 
@@ -1456,6 +1480,42 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, _app: &MonitorApp) 
     );
 }
 
+fn render_shutdown_confirmation(frame: &mut ratatui::Frame<'_>, area: Rect) {
+    let width = 44.min(area.width);
+    let height = 5.min(area.height);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Shut down proxy?",
+                Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::styled("y", Style::default().fg(TEAL)),
+                Span::styled(" confirm   ", Style::default().fg(DIM_WHITE)),
+                Span::styled("n/Esc/q", Style::default().fg(TEAL)),
+                Span::styled(" cancel", Style::default().fg(DIM_WHITE)),
+            ]),
+        ])
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(YELLOW))
+                .style(Style::default().bg(BG)),
+        )
+        .style(Style::default().bg(BG)),
+        popup,
+    );
+}
+
 fn render_shutdown_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, tick: usize) {
     let width = 40.min(area.width);
     let height = 5.min(area.height);
@@ -2359,6 +2419,51 @@ mod tests {
         assert!(events_text.contains("502"));
         assert!(events_text.contains("upstream unavailable"));
         assert!(!events_text.contains("No events"));
+    }
+
+    #[test]
+    fn shutdown_confirmation_can_be_cancelled_before_signalling_server() {
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let mut app = MonitorApp {
+            listen_url: "http://127.0.0.1:3000".to_string(),
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            detail: None,
+            focus: FocusPane::Sessions,
+            selected: 0,
+            recent_selected: 0,
+            tick: 0,
+            phase: MonitorPhase::Running,
+            shutdown: Some(shutdown_tx),
+            shutdown_complete: Some(mpsc::channel().1),
+        };
+
+        app.request_shutdown_confirmation();
+        assert_eq!(app.phase, MonitorPhase::ConfirmingShutdown);
+        assert!(matches!(
+            shutdown_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        let state = MonitorHandle::default().snapshot();
+        let screen = draw(80, 24, |frame| render(frame, &mut app, &state));
+        let text = buffer_text(&screen);
+        assert!(text.contains("Shut down proxy?"), "{text}");
+        assert!(text.contains("y confirm"), "{text}");
+        assert!(text.contains("n/Esc/q cancel"), "{text}");
+
+        app.cancel_shutdown_confirmation();
+        assert_eq!(app.phase, MonitorPhase::Running);
+        assert!(matches!(
+            shutdown_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        app.request_shutdown_confirmation();
+        app.begin_shutdown();
+        assert_eq!(app.phase, MonitorPhase::ShuttingDown);
+        assert_eq!(shutdown_rx.try_recv(), Ok(()));
     }
 
     #[test]
