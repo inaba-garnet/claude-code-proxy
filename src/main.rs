@@ -58,6 +58,11 @@ enum Commands {
         #[command(subcommand)]
         command: ProviderGroup,
     },
+    #[command(name = "opencode")]
+    OpenCode {
+        #[command(subcommand)]
+        command: ProviderGroup,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -157,6 +162,7 @@ fn main() -> Result<()> {
         Commands::Kimi { command } => run_provider_cli("kimi", command),
         Commands::Cursor { command } => run_provider_cli("cursor", command),
         Commands::Grok { command } => run_provider_cli("grok", command),
+        Commands::OpenCode { command } => run_provider_cli("opencode", command),
     }
 }
 
@@ -216,8 +222,8 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
 
 fn print_models(registry: &Registry, full: bool) {
     let grouped = registry.grouped_models();
-    for provider in ["codex", "kimi", "grok", "cursor"] {
-        let Some(models) = grouped.get(provider) else {
+    for provider in ["codex", "kimi", "grok", "cursor", "opencode"] {
+        let Some(models) = grouped.get(provider).filter(|models| !models.is_empty()) else {
             continue;
         };
         if full || provider != "cursor" {

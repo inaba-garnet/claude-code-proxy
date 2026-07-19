@@ -115,8 +115,67 @@ struct AppState {
     monitor: Option<MonitorHandle>,
 }
 
-async fn healthz() -> Json<serde_json::Value> {
-    Json(json!({ "ok": true }))
+/// Base URL each provider talks to, for reachability probes.
+fn provider_base_url(provider: &str) -> Option<String> {
+    match provider {
+        "anthropic" => Some(crate::config::anthropic_base_url()),
+        "opencode" => Some(crate::config::opencode_base_url()),
+        "kimi" => Some(crate::config::kimi_base_url()),
+        "grok" => Some(crate::config::grok_base_url()),
+        "cursor" => Some(crate::config::cursor_base_url()),
+        "codex" => Some(crate::config::codex_base_url(
+            crate::providers::codex::auth::constants::CODEX_API_ENDPOINT,
+        )),
+        _ => None,
+    }
+}
+
+/// Any HTTP reply proves the host is up; 401 and 404 are still reachable.
+async fn probe_provider(url: &str) -> serde_json::Value {
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => return json!({ "reachable": false, "error": err.to_string() }),
+    };
+    match client.get(url).send().await {
+        Ok(response) => json!({ "reachable": true, "status": response.status().as_u16() }),
+        Err(err) => json!({ "reachable": false, "error": err.to_string() }),
+    }
+}
+
+/// Reports whether each provider is configured. Reachability requires live
+/// network calls, so it is opt-in via `?probe=1` rather than paid for on every
+/// health check.
+async fn healthz(
+    State(state): State<Arc<AppState>>,
+    uri: axum::http::Uri,
+) -> Json<serde_json::Value> {
+    let probe = url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
+        .any(|(key, value)| key == "probe" && value != "0" && value != "false");
+
+    let mut providers = Map::new();
+    for name in state.registry.list_provider_names() {
+        let Some(provider) = state.registry.provider(&name) else {
+            continue;
+        };
+        let mut entry = Map::new();
+        entry.insert(
+            "configured".to_string(),
+            json!(provider.cli().status().is_ok()),
+        );
+        if let Some(base_url) = provider_base_url(&name) {
+            entry.insert("baseUrl".to_string(), json!(&base_url));
+            if probe {
+                entry.insert("probe".to_string(), probe_provider(&base_url).await);
+            }
+        }
+        providers.insert(name, Value::Object(entry));
+    }
+
+    Json(json!({ "ok": true, "providers": providers }))
 }
 
 async fn handler_messages(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
@@ -207,6 +266,71 @@ async fn dispatch_request(
             return response;
         }
     };
+
+    let session_state = if let Some(session_id) = session_id.as_deref() {
+        session::existing_session(Some(session_id), now)
+    } else {
+        None
+    };
+
+    // Anthropic passthrough is decided before parsing: the relay must send the
+    // original bytes, and a body this proxy cannot deserialize should still
+    // reach Anthropic rather than 400 here.
+    if let Some(raw_model) = peek_model(&body_bytes) {
+        let normalized = normalize_incoming_model(&raw_model);
+        let routed = state.registry.provider_for_model(
+            &normalized,
+            session_state
+                .as_ref()
+                .and_then(|state| state.affinity_provider.as_ref()),
+        );
+        if routed.as_ref().map(|provider| provider.name()) == Some("anthropic") {
+            if let Some(monitor) = state.monitor.as_ref() {
+                monitor.provider_selected(&req_id, "anthropic", &raw_model, None);
+            }
+            let response =
+                crate::passthrough::forward(method.clone(), &uri, &headers, body_bytes).await;
+            log_request_completed(
+                &log,
+                RequestLogContext {
+                    req_id: &req_id,
+                    provider: Some("anthropic"),
+                    model: Some(&raw_model),
+                    count_tokens,
+                    status: response.status(),
+                    started_at,
+                },
+            );
+            let status = response.status();
+            if status.is_success() {
+                return monitor_response_body(response, request_guard);
+            }
+            // Upstream errors reach the client unchanged; `record_failed_response`
+            // re-emits the same bytes and only adds logging and monitor state.
+            let (response, details) = record_failed_response(
+                &log,
+                FailedResponseLogContext {
+                    req_id: &req_id,
+                    provider: Some("anthropic"),
+                    model: Some(&raw_model),
+                    count_tokens,
+                    started_at,
+                },
+                response,
+            )
+            .await;
+            monitor_failed(
+                state.monitor.as_ref(),
+                &req_id,
+                Some(status),
+                details
+                    .as_ref()
+                    .map(|details| details.message.as_str())
+                    .unwrap_or("Upstream error"),
+            );
+            return response;
+        }
+    }
 
     let mut body: crate::anthropic::schema::MessagesRequest = match parse_json_body(&body_bytes) {
         Ok(body) => body,
@@ -305,11 +429,6 @@ async fn dispatch_request(
 
     let normalized_model = normalize_incoming_model(model);
     body.model = Some(normalized_model.clone());
-    let session_state = if let Some(session_id) = session_id.as_deref() {
-        session::existing_session(Some(session_id), now)
-    } else {
-        None
-    };
 
     let provider = state.registry.provider_for_model(
         &normalized_model,
@@ -787,12 +906,42 @@ where
     })
 }
 
-async fn fallback_handler(method: axum::http::Method, uri: axum::http::Uri) -> Response {
-    json_error(
-        StatusCode::NOT_FOUND,
-        "not_found",
-        format!("No route for {method} {}", uri.path()),
-    )
+/// Read just the `model` field, tolerating anything else in the body.
+///
+/// Deliberately looser than `MessagesRequest`: routing must not depend on this
+/// proxy understanding the rest of a Claude Code request.
+fn peek_model(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(body)
+        .ok()?
+        .get("model")?
+        .as_str()
+        .map(std::string::ToString::to_string)
+}
+
+/// Relay any route this proxy does not implement straight to Anthropic, so
+/// features Claude Code gains later keep working without a proxy change.
+async fn fallback_handler(req: Request<Body>) -> Response {
+    let log = create_logger("server");
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!("Could not read request body: {err}"),
+            );
+        }
+    };
+    log.info(
+        "passthrough_request",
+        Some(serde_json::Map::from_iter([
+            ("method".to_string(), json!(parts.method.as_str())),
+            ("path".to_string(), json!(parts.uri.path())),
+            ("query".to_string(), redacted_query(&parts.uri)),
+        ])),
+    );
+    crate::passthrough::forward(parts.method.clone(), &parts.uri, &parts.headers, bytes).await
 }
 
 fn current_millis() -> u64 {

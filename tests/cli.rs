@@ -25,6 +25,7 @@ fn models_prints_all_providers() -> Result<(), Box<dyn std::error::Error>> {
     assert!(out.contains("codex:"));
     assert!(out.contains("kimi:"));
     assert!(out.contains("cursor:"));
+    assert!(out.contains("opencode:"));
 
     let mut cmd = Command::cargo_bin("claude-code-proxy")?;
     cmd.args(["models", "--full"]);
@@ -101,5 +102,42 @@ fn kimi_auth_status_reads_stored_auth() -> Result<(), Box<dyn std::error::Error>
     cmd.args(["kimi", "auth", "status"]);
     cmd.env("CCP_CONFIG_DIR", temp.path());
     cmd.assert().success().stdout(contains("User: u"));
+    Ok(())
+}
+
+/// The opencode provider has no login flow, so its auth commands report the
+/// API-key setup instead. `status` still follows the shared exit-code contract:
+/// 0 when configured, 1 when not.
+#[test]
+fn opencode_auth_reports_api_key_state() -> Result<(), Box<dyn std::error::Error>> {
+    // Isolate the config dir so a real ~/.config/claude-code-proxy/config.json
+    // (which may carry an opencode.apiKey) cannot make the unauthenticated case
+    // look authenticated.
+    let temp = TempDir::new()?;
+
+    Command::cargo_bin("claude-code-proxy")?
+        .args(["opencode", "auth", "status"])
+        .env("CCP_CONFIG_DIR", temp.path())
+        .env_remove("OPENCODE_API_KEY")
+        .env_remove("CCP_OPENCODE_API_KEY")
+        .assert()
+        .code(1)
+        .stdout(contains("Not authenticated"));
+
+    Command::cargo_bin("claude-code-proxy")?
+        .args(["opencode", "auth", "status"])
+        .env("CCP_CONFIG_DIR", temp.path())
+        .env("OPENCODE_API_KEY", "test-key")
+        .assert()
+        .success();
+
+    for command in ["login", "device"] {
+        Command::cargo_bin("claude-code-proxy")?
+            .args(["opencode", "auth", command])
+            .env("CCP_CONFIG_DIR", temp.path())
+            .assert()
+            .code(2)
+            .stderr(contains("OPENCODE_API_KEY"));
+    }
     Ok(())
 }

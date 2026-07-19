@@ -272,6 +272,18 @@ fn build_messages(req: &MessagesRequest) -> Result<Vec<KimiMessage>, anyhow::Err
         match msg.role.as_str() {
             "user" => push_user_messages(&mut out, &blocks),
             "assistant" => push_assistant_message(&mut out, &blocks),
+            // Claude Code 2.1.x sends system-role messages inline, alongside
+            // the top-level `system` field. Carry them through as system
+            // messages, which chat-completions accepts, rather than failing the
+            // whole request.
+            "system" => {
+                if let Some(content) = flatten_system_text(Some(&msg.content)) {
+                    out.push(KimiMessage::System {
+                        role: "system".to_string(),
+                        content,
+                    });
+                }
+            }
             other => {
                 anyhow::bail!("unexpected message role: {other}");
             }
@@ -492,6 +504,46 @@ fn push_assistant_message(out: &mut Vec<KimiMessage>, blocks: &[ContentBlock]) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Claude Code 2.1.x puts system-role messages in `messages`, not only in
+    /// the top-level `system` field. Rejecting them failed the whole request.
+    #[test]
+    fn translate_carries_inline_system_messages() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "kimi-for-coding",
+            "max_tokens": 16,
+            "system": "top level",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "system", "content": [{"type": "text", "text": "inline system"}]},
+            ],
+        }))
+        .expect("request");
+
+        let out = translate_request(&req, TranslateOptions { session_id: None })
+            .expect("inline system messages must not fail translation");
+
+        let system_texts: Vec<&str> = out
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                KimiMessage::System { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(system_texts, vec!["top level", "inline system"]);
+    }
+
+    #[test]
+    fn translate_still_rejects_unknown_roles() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "kimi-for-coding",
+            "max_tokens": 16,
+            "messages": [{"role": "developer", "content": "nope"}],
+        }))
+        .expect("request");
+        assert!(translate_request(&req, TranslateOptions { session_id: None }).is_err());
+    }
 
     #[test]
     fn translate_text_request_defaults_like_reference() {

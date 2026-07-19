@@ -9,6 +9,7 @@ use crate::paths;
 pub enum AliasProvider {
     Codex,
     Kimi,
+    Anthropic,
 }
 
 impl AliasProvider {
@@ -16,6 +17,7 @@ impl AliasProvider {
         match self {
             AliasProvider::Codex => "codex",
             AliasProvider::Kimi => "kimi",
+            AliasProvider::Anthropic => "anthropic",
         }
     }
 }
@@ -42,6 +44,23 @@ struct FileConfig {
     pub codex: Option<CodexConfig>,
     pub cursor: Option<CursorConfig>,
     pub grok: Option<GrokConfig>,
+    pub anthropic: Option<AnthropicConfig>,
+    pub opencode: Option<OpenCodeConfig>,
+}
+
+#[derive(Deserialize, Clone)]
+struct AnthropicConfig {
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct OpenCodeConfig {
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+    #[serde(rename = "apiKey")]
+    pub api_key: Option<String>,
+    pub models: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -103,6 +122,7 @@ fn parse_alias(raw: &str) -> Option<AliasProvider> {
     match raw {
         "codex" => Some(AliasProvider::Codex),
         "kimi" => Some(AliasProvider::Kimi),
+        "anthropic" => Some(AliasProvider::Anthropic),
         _ => None,
     }
 }
@@ -296,6 +316,77 @@ pub fn grok_client_version() -> String {
         return version;
     }
     "0.2.93".to_string()
+}
+
+pub fn anthropic_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_ANTHROPIC_BASE_URL") {
+        return raw.clone();
+    }
+    if let Some(anthropic) = read_file_config(&paths::config_dir()).and_then(|f| f.anthropic)
+        && let Some(url) = anthropic.base_url
+    {
+        return url;
+    }
+    "https://api.anthropic.com".to_string()
+}
+
+/// Base URL of the OpenAI-compatible endpoint. Defaults to OpenCode Go, but any
+/// chat-completions endpoint works.
+pub fn opencode_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_OPENCODE_BASE_URL") {
+        return raw.clone();
+    }
+    if let Some(opencode) = read_file_config(&paths::config_dir()).and_then(|f| f.opencode)
+        && let Some(url) = opencode.base_url
+    {
+        return url;
+    }
+    "https://opencode.ai/zen/go/v1".to_string()
+}
+
+/// API key for the OpenAI-compatible endpoint. There is no OAuth flow: the key
+/// comes from the environment or config file and is never written by the proxy.
+pub fn opencode_api_key() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    for key in ["CCP_OPENCODE_API_KEY", "OPENCODE_API_KEY"] {
+        if let Some(raw) = env.get(key)
+            && !raw.is_empty()
+        {
+            return Some(raw.clone());
+        }
+    }
+    read_file_config(&paths::config_dir())
+        .and_then(|f| f.opencode)
+        .and_then(|opencode| opencode.api_key)
+        .filter(|key| !key.is_empty())
+}
+
+/// Model IDs routed to the OpenAI-compatible endpoint. Configurable so that a
+/// different endpoint's models can be reached without a code change.
+pub fn opencode_models() -> Vec<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_OPENCODE_MODELS") {
+        let models: Vec<String> = raw
+            .split(',')
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .collect();
+        if !models.is_empty() {
+            return models;
+        }
+    }
+    if let Some(opencode) = read_file_config(&paths::config_dir()).and_then(|f| f.opencode)
+        && let Some(models) = opencode.models
+        && !models.is_empty()
+    {
+        return models;
+    }
+    crate::registry::OPENCODE_DEFAULT_MODELS
+        .iter()
+        .map(|model| (*model).to_string())
+        .collect()
 }
 
 pub fn is_verbose() -> bool {

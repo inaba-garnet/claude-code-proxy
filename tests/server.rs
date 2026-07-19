@@ -63,7 +63,28 @@ async fn healthz_returns_ok() {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap();
-    assert_eq!(body, json!({"ok": true}));
+    assert_eq!(body["ok"], json!(true));
+
+    // Every registered provider reports whether it is configured, and those
+    // with a known upstream report it. No probe was requested, so no provider
+    // may claim reachability: that would mean healthz made network calls.
+    let providers = body["providers"].as_object().expect("providers object");
+    assert!(providers.contains_key("anthropic"));
+    assert!(providers.contains_key("codex"));
+    assert!(providers.contains_key("opencode"));
+    for (name, entry) in providers {
+        assert!(
+            entry["configured"].is_boolean(),
+            "{name} missing configured"
+        );
+        assert!(entry.get("probe").is_none(), "{name} probed without ?probe");
+    }
+    assert!(
+        providers["anthropic"]["baseUrl"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("http")
+    );
 }
 
 #[tokio::test]
@@ -231,8 +252,15 @@ async fn context_window_hint_is_removed_before_provider_dispatch() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+/// Unknown routes are relayed to Anthropic rather than answered locally; see
+/// `tests/anthropic_passthrough.rs` for the relay itself. Pointing the relay at
+/// a closed port keeps this test off the network and proves the failure is
+/// reported instead of swallowed.
 #[tokio::test]
-async fn unknown_routes_use_anthropic_not_found_error() {
+async fn unknown_routes_fall_through_to_anthropic() {
+    unsafe {
+        std::env::set_var("CCP_ANTHROPIC_BASE_URL", "http://127.0.0.1:1");
+    }
     let app = app(Arc::new(Registry::with_default_alias()));
     let response = app
         .oneshot(
@@ -244,13 +272,16 @@ async fn unknown_routes_use_anthropic_not_found_error() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body: Value = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap();
     assert_eq!(body["type"].as_str().unwrap_or(""), "error");
+    unsafe {
+        std::env::remove_var("CCP_ANTHROPIC_BASE_URL");
+    }
 }
 
 #[tokio::test]

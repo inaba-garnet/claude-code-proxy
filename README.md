@@ -8,6 +8,26 @@ Claude Code, powered by **OpenAI**, **Kimi**, **Grok**, or **Cursor**.
 [How it works](#how-it-works) · [Configuration](#configuration) ·
 [Switching models](#switching-models-and-backends) · [Limitations](#limitations)
 
+## このフォークについて
+
+本家 [raine/claude-code-proxy](https://github.com/raine/claude-code-proxy) に、
+次の3点を追加したフォークです。
+
+- **Anthropic 素通しプロバイダー** — `CCP_ALIAS_PROVIDER=anthropic` にすると、
+  `claude-*` 系のリクエストを変換せず `api.anthropic.com` へそのまま転送します。
+  Claude Code が持つ Max サブスクの認証をそのまま使い、`ANTHROPIC_AUTH_TOKEN` も
+  設定しません。**Claude を既定のまま残し、モデル ID を変えたときだけ** Codex /
+  OpenCode Go / Kimi / Grok / Cursor へ分岐できます。
+- **OpenCode Go（OpenAI 互換）対応** — DeepSeek・Qwen・GLM・MiniMax など
+  OpenCode Go の全モデルを、`deepseek-v4-flash` のようなモデル ID で利用できます。
+  既存の Kimi 変換を流用し、`reasoning_content` は thinking ブロックへ変換します。
+- **運用面の補助** — 未実装パスの Anthropic への透過転送、`/healthz` での
+  プロバイダー到達性チェック、`opencode` サブコマンドを追加しています。
+
+素通し・透過転送では認証情報やリクエストボディを一切改変しません。ただし
+Remote Control はカスタム `ANTHROPIC_BASE_URL` 下では Claude Code 側が無効化する
+ため利用できません（[Limitations](#limitations) 参照）。
+
 > [!TIP]
 > I'm building [aven](https://github.com/raine/aven), a local-first task manager
 > for power users and agents who live in the terminal.
@@ -254,6 +274,90 @@ If you'd rather disable auto-compact completely, set
 Claude Code can compact for you.
 
 ## Providers
+
+### Anthropic (passthrough)
+
+Upstream: `https://api.anthropic.com` (override with `CCP_ANTHROPIC_BASE_URL`).
+
+Relays requests unchanged instead of translating them, so a Claude Code that is
+already logged in to claude.ai keeps using its own subscription credentials. The
+proxy stores nothing and has no auth command: whatever the client sends —
+`authorization`, `x-api-key`, `anthropic-beta`, the query string — is forwarded
+as-is, and the response, including SSE, streams straight back. Only hop-by-hop
+headers are dropped.
+
+Enable it by making `anthropic` the alias provider, then leave
+`ANTHROPIC_AUTH_TOKEN` unset:
+
+```sh
+CCP_ALIAS_PROVIDER=anthropic claude-code-proxy serve
+ANTHROPIC_BASE_URL=http://localhost:18765 claude
+```
+
+Anthropic model ids (`sonnet`, `claude-opus-4-8`, `haiku`, …) then pass through,
+while `gpt-*`, `kimi-*`, `grok-*`, `cursor:*` and the openai-compat model ids
+still route to their own providers. Routing happens before the request body is
+parsed, so the bytes reach Anthropic exactly as Claude Code wrote them —
+including model suffixes like `[1m]` and any request fields a future Claude Code
+adds. Routes the proxy does not implement are relayed too, which Claude Code
+needs: it probes `HEAD /` on startup.
+
+**Remote Control does not work through the proxy** — see
+[Limitations](#limitations).
+
+### OpenAI-compatible (OpenCode Go)
+
+Upstream: `https://opencode.ai/zen/go/v1` (override with
+`CCP_OPENCODE_BASE_URL`). Any OpenAI-compatible chat-completions endpoint works.
+
+Reuses the Kimi provider's translation, including its handling of
+`reasoning_content` deltas, which DeepSeek emits and which are surfaced as
+Anthropic `thinking` blocks.
+
+Authentication is a static API key; there is no OAuth flow and the proxy never
+writes it to disk:
+
+```sh
+export OPENCODE_API_KEY=...           # or CCP_OPENCODE_API_KEY
+CCP_OPENCODE_MODELS=deepseek-v4-flash claude-code-proxy serve
+```
+
+Supported proxy model ids — the full OpenCode Go catalog, all verified against
+the live endpoint:
+
+- `grok-4.5`
+- `glm-5.2`, `glm-5.1`
+- `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`
+- `deepseek-v4-pro`, `deepseek-v4-flash`
+- `mimo-v2.5`, `mimo-v2.5-pro`
+- `minimax-m3`, `minimax-m2.7`, `minimax-m2.5`
+- `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`
+
+The list is configurable via `CCP_OPENCODE_MODELS` (comma-separated) or
+`opencode.models` in `config.json`, so a different OpenAI-compatible endpoint's
+catalog can be used instead.
+
+**Two of these ids collide with native providers.** `grok-4.5` belongs to the
+Grok provider and `kimi-k2.6` to the Kimi provider, and a bare id keeps going
+there. Prefix with `opencode-go/` to force OpenCode's copy:
+
+```sh
+ANTHROPIC_MODEL=opencode-go/kimi-k2.6 claude     # OpenCode Go
+ANTHROPIC_MODEL=kimi-k2.6 claude                 # Kimi provider, needs Kimi auth
+```
+
+The prefix works for every model, not just the colliding two, and mirrors the
+`opencode-go/<model-id>` form used in OpenCode's own configuration.
+
+Check whether the key was picked up — note it must be set on the process running
+`serve`, not on `claude`:
+
+```sh
+claude-code-proxy opencode auth status   # exit 0 when configured, 1 when not
+```
+
+`login`, `device` and `logout` exist for symmetry with the other providers but
+only explain the key setup: there is no OAuth flow and nothing to delete.
 
 ### Codex (ChatGPT)
 
@@ -663,8 +767,13 @@ The proxy speaks enough of the Anthropic API for Claude Code:
 - `POST /v1/messages`: the main turn endpoint (streaming and non-streaming)
 - `POST /v1/messages?beta=true`: same (Claude Code always sends `?beta=true`)
 - `POST /v1/messages/count_tokens`: local token count via `gpt-tokenizer`
-  (o200k_base); used by Claude Code's compaction logic
-- `GET /healthz`: liveness check
+  (o200k_base); used by Claude Code's compaction logic. The Anthropic
+  passthrough provider forwards this upstream instead of counting locally.
+- `GET /healthz`: liveness check, plus whether each provider is configured and
+  the upstream it would use. Add `?probe=1` for live reachability checks —
+  these make one network call per provider, so they are opt-in.
+- Any other path: relayed verbatim to Anthropic, so Claude Code features the
+  proxy does not know about keep working.
 
 ## Configuration
 
@@ -1003,6 +1112,41 @@ CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
 to direct Anthropic or the other way around. For that, start a new process with
 different env (or flip the flag-file wrapper and open a new session).
 
+### Getting back to stock Claude Code
+
+Keep this to hand: it is the escape hatch when the proxy misbehaves, and the
+only way to use Remote Control. Nothing about the proxy is sticky — Claude Code
+reads its configuration at process start, so unsetting the variable is enough:
+
+```sh
+env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN claude
+```
+
+If you have put the proxy env in `~/.claude/settings.json`, keep two profiles
+and switch by copying one over `settings.json`:
+
+```sh
+# ~/.claude/settings.proxy.json      -> ANTHROPIC_BASE_URL set to the proxy
+# ~/.claude/settings.stock.json      -> "env": {} (or no ANTHROPIC_* entries)
+
+cp ~/.claude/settings.stock.json ~/.claude/settings.json   # back to stock
+cp ~/.claude/settings.proxy.json ~/.claude/settings.json   # back to the proxy
+```
+
+Open a new session after switching; running sessions keep the env they started
+with.
+
+Two things worth knowing about failure modes:
+
+- If the proxy is not running, Claude Code does not silently fall back to
+  Anthropic — it retries, then fails with
+  `API Error: Unable to connect to API (ConnectionRefused)` and a non-zero exit
+  code. Expect the retries to take a couple of minutes before the error appears,
+  so a hang right after starting the proxy-backed profile usually means the
+  proxy is down rather than the request being slow.
+- `claude-code-proxy` never edits `~/.claude/settings.json` for you, so removing
+  the variable is always sufficient to undo it.
+
 ### What this project does not manage
 
 - multi-provider profile GUIs or account managers
@@ -1016,6 +1160,23 @@ supported shape.
 
 ## Limitations
 
+- **Remote Control is unavailable behind the proxy, including in passthrough
+  mode.** Claude Code disables the feature whenever `ANTHROPIC_BASE_URL` points
+  anywhere other than `api.anthropic.com`, and its bridge dials a hardcoded base
+  URL rather than reading the variable — so that traffic never reaches the proxy
+  and cannot be relayed. This is a client-side guard on the *value* of the
+  variable, not a reachability problem, so no proxy-side change fixes it. To use
+  Remote Control, drop back to stock Claude Code with the variable unset; see
+  [Getting back to stock Claude Code](#getting-back-to-stock-claude-code).
+- **OpenCode Go — `thinking` is not sent.** Kimi's translation always opts in
+  with `thinking: {"type":"enabled"}`, but `minimax-m3` rejects the entire
+  request over that field. The models that do reason emit `reasoning_content`
+  without being asked, so the opencode provider omits it and loses nothing.
+- **OpenCode Go — `minimax-m3` leaks its reasoning into the reply.** It writes
+  `<think>...</think>` into the normal text content instead of
+  `reasoning_content`, so those tags show up in Claude Code's output. The other
+  MiniMax models do not. Not worked around, because stripping the tags would
+  risk mangling legitimate text.
 - **Terms of service:** OpenAI has [publicly welcomed using Codex through other
   coding harnesses](https://x.com/thsottiaux/status/2075830097488249060), though
   this does not guarantee future policy or account enforcement. Using the Kimi
