@@ -125,8 +125,15 @@ pub fn accumulate_response(
                 }
             }
             BlockKind::Tool { id, name, args } => {
+                // Tool input must be a JSON object. If the accumulated arguments
+                // fail to parse (e.g. a truncated fragment slipped through), fall
+                // back to an empty object rather than a JSON *string* — a string
+                // input is structurally invalid and always breaks downstream
+                // validation (missing required keys like `command`/`file_path`).
                 let parsed = serde_json::from_str::<Value>(args)
-                    .unwrap_or_else(|_| Value::String(args.clone()));
+                    .ok()
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
                 content.push(serde_json::json!({
                     "type": "tool_use",
                     "id": id,
@@ -200,6 +207,64 @@ mod tests {
         assert_eq!(content[1]["type"], "text");
         // Third block should be tool_use
         assert_eq!(content[2]["type"], "tool_use");
+    }
+
+    #[test]
+    fn accumulate_synthesizes_text_from_reasoning_only() {
+        // Answer delivered entirely via reasoning_content, no `content` at all.
+        let upstream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"final answer\"}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let response = accumulate_response(upstream.as_bytes(), "msg_r", "model").unwrap();
+        let content = response["content"].as_array().unwrap();
+        let text = content
+            .iter()
+            .find(|b| b["type"] == "text")
+            .expect("expected a synthesized text block");
+        assert_eq!(text["text"], "final answer");
+    }
+
+    #[test]
+    fn accumulate_tool_input_is_object_when_args_valid() {
+        // Reasoning precedes the tool call and arguments are split across chunks;
+        // the accumulated input must be a JSON object with all keys present.
+        let upstream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"ls -la\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let response = accumulate_response(upstream.as_bytes(), "msg_t", "model").unwrap();
+        let content = response["content"].as_array().unwrap();
+        let tool = content
+            .iter()
+            .find(|b| b["type"] == "tool_use")
+            .expect("expected a tool_use block");
+        assert!(tool["input"].is_object(), "input must be an object");
+        assert_eq!(tool["input"]["command"], "ls -la");
+    }
+
+    #[test]
+    fn accumulate_tool_input_falls_back_to_object_on_broken_json() {
+        // A single truncated fragment that never completes into valid JSON.
+        let upstream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let response = accumulate_response(upstream.as_bytes(), "msg_b", "model").unwrap();
+        let content = response["content"].as_array().unwrap();
+        let tool = content
+            .iter()
+            .find(|b| b["type"] == "tool_use")
+            .expect("expected a tool_use block");
+        assert!(
+            tool["input"].is_object(),
+            "input must fall back to an object, not a string"
+        );
     }
 
     #[test]

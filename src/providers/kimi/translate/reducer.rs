@@ -157,10 +157,15 @@ struct StreamError {
     r#type: Option<String>,
 }
 
-#[allow(dead_code)]
 struct ToolSlot {
+    /// Anthropic-side content block index assigned to this tool.
     block_index: usize,
+    /// Upstream (OpenAI chat-completions) `tool_calls[].index`, used to match
+    /// continuation fragments back to the slot they belong to.
+    upstream_index: usize,
+    #[allow(dead_code)]
     id: String,
+    #[allow(dead_code)]
     name: String,
 }
 
@@ -172,6 +177,8 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
     let mut text_index: Option<usize> = None;
     let mut tool_slots: Vec<ToolSlot> = Vec::new();
     let mut saw_tool_calls = false;
+    let mut saw_text = false;
+    let mut reasoning_buf = String::new();
     let mut finish_reason: Option<String> = None;
     let mut final_usage: Option<KimiUsage> = None;
 
@@ -230,6 +237,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
                     index: thinking_index.unwrap(),
                 });
             }
+            reasoning_buf.push_str(reasoning);
             out.push(ReducerEvent::ThinkingDelta {
                 index: thinking_index.unwrap(),
                 text: reasoning.clone(),
@@ -251,6 +259,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
                     index: text_index.unwrap(),
                 });
             }
+            saw_text = true;
             out.push(ReducerEvent::TextDelta {
                 index: text_index.unwrap(),
                 text: content.clone(),
@@ -270,7 +279,16 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
             }
 
             for tc in tool_calls {
-                let existing_pos = tool_slots.iter().position(|s| s.block_index == tc.index);
+                // Match on the *upstream* tool_calls index, not the Anthropic
+                // block index. These differ whenever a thinking/text block was
+                // emitted first (e.g. DeepSeek always streams reasoning before
+                // the tool call), which shifts every tool's block_index. Using
+                // block_index here caused continuation fragments (id/name absent,
+                // index=0) to miss their slot and get dropped, leaving tool_use
+                // input empty.
+                let existing_pos = tool_slots
+                    .iter()
+                    .position(|s| s.upstream_index == tc.index);
                 let block_index = if let Some(pos) = existing_pos {
                     tool_slots[pos].block_index
                 } else {
@@ -280,8 +298,9 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
                         .as_ref()
                         .and_then(|f| f.name.clone())
                         .unwrap_or_default();
-                    if id.is_empty() || name.is_empty() {
-                        // Defensive: skip out-of-order fragments
+                    if id.is_empty() && name.is_empty() {
+                        // Defensive: a fragment with no matching slot and no
+                        // id/name cannot open a tool block; skip it.
                         continue;
                     }
                     saw_tool_calls = true;
@@ -289,6 +308,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
                     next_block_index += 1;
                     tool_slots.push(ToolSlot {
                         block_index: bi,
+                        upstream_index: tc.index,
                         id: id.clone(),
                         name: name.clone(),
                     });
@@ -331,6 +351,23 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
         out.push(ReducerEvent::ToolStop {
             index: slot.block_index,
         });
+    }
+
+    // Empty-answer fallback: DeepSeek/Qwen sometimes stream the whole answer via
+    // `reasoning_content` and never emit any `content`, finishing with only a
+    // thinking block. Downstream (Claude Code sub-agents) reads the final text
+    // block as the turn's result, so that turn looks blank. If we saw reasoning
+    // but no answer text and no tool call, synthesize a text block from the
+    // accumulated reasoning so the response is non-empty.
+    if !saw_text && !saw_tool_calls && !reasoning_buf.is_empty() {
+        // This is the last block, so no need to advance next_block_index.
+        let bi = next_block_index;
+        out.push(ReducerEvent::TextStart { index: bi });
+        out.push(ReducerEvent::TextDelta {
+            index: bi,
+            text: reasoning_buf.clone(),
+        });
+        out.push(ReducerEvent::TextStop { index: bi });
     }
 
     let stop_reason = match finish_reason.as_deref() {
@@ -418,6 +455,102 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn reducer_keeps_tool_args_when_reasoning_precedes_and_args_split() {
+        // Reasoning first (shifts the tool's block index off the upstream index),
+        // then a tool call whose arguments arrive across two fragments.
+        let upstream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"ls\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let events = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let deltas: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ReducerEvent::ToolDelta { partial_json, .. } => Some(partial_json.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, "{\"command\":\"ls\"}");
+    }
+
+    #[test]
+    fn reducer_handles_parallel_tool_calls_with_leading_thinking() {
+        let upstream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"file_path\\\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_b\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"a.rs\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\":\\\"ls\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let events = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        // Two distinct tool blocks, each with its full argument string.
+        let starts: Vec<usize> = events
+            .iter()
+            .filter_map(|e| match e {
+                ReducerEvent::ToolStart { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 2);
+        let joined = |idx: usize| -> String {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    ReducerEvent::ToolDelta {
+                        index,
+                        partial_json,
+                    } if *index == idx => Some(partial_json.as_str()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(joined(starts[0]), "{\"file_path\":\"a.rs\"}");
+        assert_eq!(joined(starts[1]), "{\"command\":\"ls\"}");
+    }
+
+    #[test]
+    fn reducer_synthesizes_text_when_only_reasoning() {
+        let upstream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"the answer is 42\"}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let events = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let texts: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ReducerEvent::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, "the answer is 42");
+    }
+
+    #[test]
+    fn reducer_does_not_synthesize_text_when_answer_present() {
+        let upstream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"real\"}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let events = reduce_upstream_bytes(upstream.as_bytes()).unwrap();
+        let texts: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                ReducerEvent::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["real"]);
     }
 
     #[test]
