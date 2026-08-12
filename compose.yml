@@ -1,0 +1,42 @@
+services:
+  claude-code-proxy:
+    build:
+      context: .
+    image: claude-code-proxy:local
+    container_name: claude-code-proxy
+    restart: unless-stopped
+    environment:
+      CCP_BIND_ADDRESS: 0.0.0.0
+      PORT: "18765"
+      CCP_CONFIG_DIR: /config
+      RUST_LOG: info
+      # claude-* とエイリアス (opus/sonnet/haiku) を Codex に翻訳せず、
+      # api.anthropic.com へそのまま中継する。認証はクライアントが送ってきた
+      # x-api-key / authorization をそのまま転送する方式なので、
+      # サーバ側に Anthropic のキーを置く必要はない (置く場所も無い)。
+      CCP_ALIAS_PROVIDER: anthropic
+    # OpenCode (OpenAI互換) のAPIキー置き場。opencode.env.example を参照。
+    # APIキーを compose.yml に直接書かず、gitignore 済みの別ファイルに追い出すため
+    # environment: ではなく env_file を使う。
+    env_file:
+      - path: ./opencode.env
+        required: false
+    volumes:
+      # 認証トークン (auth.json, mode 0600) と config.json の永続化
+      - ./config:/config
+    ports:
+      # プロキシ本体 — LAN / Tailscale の他端末から使う
+      - "18765:18765"
+      # Codex / Grok ブラウザOAuth のコールバック待ち受け
+      - "1455:1455"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18765/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

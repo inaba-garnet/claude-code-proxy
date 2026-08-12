@@ -1,0 +1,11 @@
+# 認証トークンを含むため、ビルドコンテキストから必ず除外する
+config/
+opencode.env
+target/
+.git/
+tests/
+meta/
+hooks/
+scripts/
+docs/
+*.md

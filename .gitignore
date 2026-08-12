@@ -2,3 +2,7 @@ node_modules/
 dist/
 .astro/
 target/
+
+# Docker 運用時の認証情報・設定の永続化先 (auth.json / config.json)
+config/
+opencode.env
