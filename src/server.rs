@@ -1456,6 +1456,71 @@ async fn dispatch_request(
         }
     };
 
+    let session_state = if let Some(session_id) = session_id.as_deref() {
+        session::existing_session(Some(session_id), now)
+    } else {
+        None
+    };
+
+    // Anthropic passthrough is decided before parsing: the relay must send the
+    // original bytes, and a body this proxy cannot deserialize should still
+    // reach Anthropic rather than 400 here.
+    if let Some(raw_model) = peek_model(&body_bytes) {
+        let normalized = normalize_incoming_model(&raw_model);
+        let routed = state.registry.provider_for_model(
+            &normalized,
+            session_state
+                .as_ref()
+                .and_then(|state| state.affinity_provider.as_ref()),
+        );
+        if routed.as_ref().map(|provider| provider.name()) == Some("anthropic") {
+            if let Some(monitor) = state.monitor.as_ref() {
+                monitor.provider_selected(&req_id, "anthropic", &raw_model, None);
+            }
+            let response =
+                crate::passthrough::forward(method.clone(), &uri, &headers, body_bytes).await;
+            log_request_completed(
+                &log,
+                RequestLogContext {
+                    req_id: &req_id,
+                    provider: Some("anthropic"),
+                    model: Some(&raw_model),
+                    count_tokens,
+                    status: response.status(),
+                    started_at,
+                },
+            );
+            let status = response.status();
+            if status.is_success() {
+                return monitor_response_body(response, request_guard);
+            }
+            // Upstream errors reach the client unchanged; `record_failed_response`
+            // re-emits the same bytes and only adds logging and monitor state.
+            let (response, details) = record_failed_response(
+                &log,
+                FailedResponseLogContext {
+                    req_id: &req_id,
+                    provider: Some("anthropic"),
+                    model: Some(&raw_model),
+                    count_tokens,
+                    started_at,
+                },
+                response,
+            )
+            .await;
+            monitor_failed(
+                state.monitor.as_ref(),
+                &req_id,
+                Some(status),
+                details
+                    .as_ref()
+                    .map(|details| details.message.as_str())
+                    .unwrap_or("Upstream error"),
+            );
+            return response;
+        }
+    }
+
     let mut body: crate::anthropic::schema::MessagesRequest = match parse_json_body(&body_bytes) {
         Ok(body) => body,
         Err(response) => {
@@ -1553,11 +1618,6 @@ async fn dispatch_request(
 
     let mut normalized_model = normalize_incoming_model(model);
     body.model = Some(normalized_model.clone());
-    let session_state = if let Some(session_id) = session_id.as_deref() {
-        session::existing_session(Some(session_id), now)
-    } else {
-        None
-    };
     let session_affinity = session_state
         .as_ref()
         .and_then(|state| state.affinity_provider.as_ref());
@@ -2107,12 +2167,52 @@ where
     })
 }
 
-async fn fallback_handler(method: axum::http::Method, uri: axum::http::Uri) -> Response {
-    json_error(
-        StatusCode::NOT_FOUND,
-        "not_found",
-        format!("No route for {method} {}", uri.path()),
-    )
+/// Read just the `model` field, tolerating anything else in the body.
+///
+/// Deliberately looser than `MessagesRequest`: routing must not depend on this
+/// proxy understanding the rest of a Claude Code request.
+fn peek_model(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(body)
+        .ok()?
+        .get("model")?
+        .as_str()
+        .map(std::string::ToString::to_string)
+}
+
+/// In passthrough mode, relay any route this proxy does not implement straight
+/// to Anthropic, so features Claude Code gains later keep working without a
+/// proxy change. Every other alias provider keeps the plain 404: the opt-in
+/// OpenAI-compatible routes rely on it to report that they are switched off,
+/// and a translating user has no reason to leak an unknown route upstream.
+async fn fallback_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
+    let log = create_logger("server");
+    let (parts, body) = req.into_parts();
+    if !state.registry.is_passthrough() {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("No route for {} {}", parts.method, parts.uri.path()),
+        );
+    }
+    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!("Could not read request body: {err}"),
+            );
+        }
+    };
+    log.info(
+        "passthrough_request",
+        Some(serde_json::Map::from_iter([
+            ("method".to_string(), json!(parts.method.as_str())),
+            ("path".to_string(), json!(parts.uri.path())),
+            ("query".to_string(), redacted_query(&parts.uri)),
+        ])),
+    );
+    crate::passthrough::forward(parts.method.clone(), &parts.uri, &parts.headers, bytes).await
 }
 
 fn current_millis() -> u64 {

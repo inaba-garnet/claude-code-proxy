@@ -9,6 +9,7 @@ use crate::paths;
 pub enum AliasProvider {
     Codex,
     Kimi,
+    Anthropic,
 }
 
 impl AliasProvider {
@@ -16,6 +17,7 @@ impl AliasProvider {
         match self {
             AliasProvider::Codex => "codex",
             AliasProvider::Kimi => "kimi",
+            AliasProvider::Anthropic => "anthropic",
         }
     }
 }
@@ -45,6 +47,7 @@ struct FileConfig {
     pub cursor: Option<CursorConfig>,
     pub grok: Option<GrokConfig>,
     pub opencode: Option<OpenCodeConfig>,
+    pub anthropic: Option<AnthropicConfig>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -114,6 +117,12 @@ struct OpenCodeConfig {
     pub base_url: Option<String>,
 }
 
+#[derive(Deserialize, Clone)]
+struct AnthropicConfig {
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct FileLog {
     pub verbose: Option<bool>,
@@ -124,6 +133,7 @@ fn parse_alias(raw: &str) -> Option<AliasProvider> {
     match raw {
         "codex" => Some(AliasProvider::Codex),
         "kimi" => Some(AliasProvider::Kimi),
+        "anthropic" => Some(AliasProvider::Anthropic),
         _ => None,
     }
 }
@@ -396,6 +406,21 @@ pub fn grok_client_version() -> String {
         return version;
     }
     "0.2.93".to_string()
+}
+
+/// Upstream the Anthropic passthrough relays to. Overridable so the relay can
+/// be pointed at a gateway or a test server.
+pub fn anthropic_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_ANTHROPIC_BASE_URL") {
+        return raw.clone();
+    }
+    if let Some(anthropic) = read_file_config(&paths::config_dir()).and_then(|f| f.anthropic)
+        && let Some(url) = anthropic.base_url
+    {
+        return url;
+    }
+    "https://api.anthropic.com".to_string()
 }
 
 // ---------------------------------------------------------------------------

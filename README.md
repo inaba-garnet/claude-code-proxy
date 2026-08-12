@@ -13,6 +13,23 @@ LLM docs: <https://claude-code-proxy.raine.dev/llms.txt>
 > I'm building [aven](https://github.com/raine/aven), a local-first task manager
 > for power users and agents.
 
+## このフォークについて
+
+本家 [raine/claude-code-proxy](https://github.com/raine/claude-code-proxy) に
+**Anthropic 素通しプロバイダー**だけを追加したフォークです。それ以外は本家に
+追従します。
+
+`CCP_ALIAS_PROVIDER=anthropic` にすると、`claude-*` 系のリクエストを変換せず
+`api.anthropic.com` へそのまま転送します。Claude Code が持つ Max サブスクの
+認証をそのまま使い、`ANTHROPIC_AUTH_TOKEN` も設定しません。**Claude を既定の
+まま残し、モデル ID を変えたときだけ** Codex / Kimi / Grok / OpenCode Go /
+Cursor へ分岐できます。詳細は [Anthropic (passthrough)](#anthropic-passthrough)
+を参照してください。
+
+素通しでは認証情報やリクエストボディを一切改変しません。ただし Remote Control
+はカスタム `ANTHROPIC_BASE_URL` 下では Claude Code 側が無効化するため利用でき
+ません。
+
 ## Why?
 
 Claude Code remains an excellent coding harness, with strong tools, skills,
@@ -90,9 +107,41 @@ The opt-in Images API returns base64 image data and consumes the signed-in accou
 | Grok         | grok.com                       | Registered Grok models                          |
 | OpenCode Go  | OpenCode Go subscription       | Non-conflicting IDs and `opencode-go/<model-id>` |
 | Cursor Agent | Cursor account                 | Cursor aliases and `cursor:<model-id>` prefixes |
+| Anthropic    | claude.ai (fork only)          | `claude-*` relayed verbatim, no translation     |
 
 Run `claude-code-proxy models` for the current catalog or
 `claude-code-proxy models --full` for every dynamic Cursor alias.
+
+### Anthropic (passthrough)
+
+Upstream: `https://api.anthropic.com` (override with `CCP_ANTHROPIC_BASE_URL`).
+
+Relays requests unchanged instead of translating them, so a Claude Code that is
+already logged in to claude.ai keeps using its own subscription credentials. The
+proxy stores nothing and has no auth command: whatever the client sends —
+`authorization`, `x-api-key`, `anthropic-beta`, the query string — is forwarded
+as-is, and the response, including SSE, streams straight back. Only hop-by-hop
+headers are dropped.
+
+Enable it by making `anthropic` the alias provider, then leave
+`ANTHROPIC_AUTH_TOKEN` unset:
+
+```sh
+CCP_ALIAS_PROVIDER=anthropic claude-code-proxy serve
+ANTHROPIC_BASE_URL=http://localhost:18765 claude
+```
+
+Anthropic model ids (`sonnet`, `claude-opus-5`, `haiku`, …) then pass through,
+while `gpt-*`, `kimi-*`, `grok-*`, `cursor:*` and the OpenCode Go model ids
+still route to their own providers. Routing happens before the request body is
+parsed, so the bytes reach Anthropic exactly as Claude Code wrote them —
+including model suffixes like `[1m]` and any request fields a future Claude Code
+adds. In this mode, routes the proxy does not implement are relayed too, which
+Claude Code needs: it probes `HEAD /` on startup. Under any other alias
+provider those routes keep returning the usual 404.
+
+**Remote Control does not work through the proxy**: Claude Code disables it
+under a custom `ANTHROPIC_BASE_URL`.
 
 > [!WARNING]
 > The proxy accepts local requests without client authentication. It binds to
