@@ -22,7 +22,7 @@ use crossterm::{
 use jiff::{Timestamp, Zoned, tz::TimeZone};
 use ratatui::{
     Terminal,
-    backend::CrosstermBackend,
+    backend::{CrosstermBackend, TestBackend},
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -343,6 +343,52 @@ impl Drop for MonitorApp {
     fn drop(&mut self) {
         self.begin_shutdown();
     }
+}
+
+/// Render one read-only frame of the monitor UI into an off-screen buffer.
+///
+/// The whole terminal UI is a pure function of `MonitorState`, so the web
+/// monitor renders the very same `render` call into a `TestBackend` instead of
+/// a terminal and converts the resulting cells to HTML. Sharing the renderer is
+/// the point: the browser view cannot drift from the TUI.
+///
+/// The returned app state is fixed and read-only — no selection, no overlays,
+/// no shutdown channels — because a frame is served to any number of viewers
+/// who must not fight over one cursor.
+pub fn render_offscreen(
+    state: &MonitorState,
+    listen_url: &str,
+    tick: usize,
+    width: u16,
+    height: u16,
+) -> ratatui::buffer::Buffer {
+    let mut app = MonitorApp {
+        listen_url: listen_url.to_string(),
+        // The setup overlay is never shown here, so its text is never built.
+        setup_text: String::new(),
+        show_setup: false,
+        show_help: false,
+        detail: None,
+        focus: FocusPane::Sessions,
+        selected: 0,
+        recent_selected: 0,
+        tick,
+        phase: MonitorPhase::Running,
+        // `MonitorApp::drop` calls `begin_shutdown`, which only sends when a
+        // channel is present. With both `None` the drop is inert.
+        shutdown: None,
+        shutdown_complete: None,
+    };
+    app.clamp_selection(state.sessions.len(), state.recent.len());
+
+    let mut terminal = match Terminal::new(TestBackend::new(width, height)) {
+        Ok(terminal) => terminal,
+        // `TestBackend` writes to an in-memory buffer, so this cannot fail in
+        // practice; an empty frame is still better than taking the server down.
+        Err(_) => return ratatui::buffer::Buffer::empty(Rect::new(0, 0, width, height)),
+    };
+    let _ = terminal.draw(|frame| render(frame, &mut app, state));
+    terminal.backend().buffer().clone()
 }
 
 struct TerminalGuard;

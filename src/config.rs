@@ -48,6 +48,8 @@ struct FileConfig {
     pub grok: Option<GrokConfig>,
     pub opencode: Option<OpenCodeConfig>,
     pub anthropic: Option<AnthropicConfig>,
+    #[serde(rename = "webMonitor")]
+    pub web_monitor: Option<bool>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -406,6 +408,24 @@ pub fn grok_client_version() -> String {
         return version;
     }
     "0.2.93".to_string()
+}
+
+/// Whether to serve the monitor UI over HTTP at `/monitor`.
+///
+/// Off by default: the dashboard exposes session ids, project names and token
+/// spend on the same unauthenticated port as the proxy, so it is opted into
+/// deliberately — chiefly by container deployments, which have no TTY and
+/// therefore never see the terminal UI.
+pub fn web_monitor_enabled() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_WEB_MONITOR") {
+        return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+    }
+    if let Some(enabled) = read_file_config(&paths::config_dir()).and_then(|file| file.web_monitor)
+    {
+        return enabled;
+    }
+    false
 }
 
 /// Upstream the Anthropic passthrough relays to. Overridable so the relay can

@@ -249,6 +249,11 @@ pub fn app_with_features(
     let transcriptions = features
         .transcriptions_api
         .then(|| Arc::new(CodexTranscriptionBackend::new()));
+    // Taken before the handle moves into the state: the browser monitor reads
+    // the same store the terminal UI does.
+    let web_monitor = monitor
+        .clone()
+        .filter(|_| crate::config::web_monitor_enabled());
     let state = Arc::new(AppState {
         registry,
         monitor,
@@ -287,6 +292,12 @@ pub fn app_with_features(
         )
     } else {
         router
+    };
+    // Without a monitor handle there is nothing to show, so the routes are not
+    // registered at all and `/monitor` falls through like any unknown path.
+    let router = match web_monitor {
+        Some(monitor) => router.merge(crate::web_monitor::router(monitor)),
+        None => router,
     };
     router.fallback(fallback_handler).with_state(state)
 }

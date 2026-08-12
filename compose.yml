@@ -15,6 +15,10 @@ services:
       # x-api-key / authorization をそのまま転送する方式なので、
       # サーバ側に Anthropic のキーを置く必要はない (置く場所も無い)。
       CCP_ALIAS_PROVIDER: anthropic
+      # 監視ダッシュボードを http://<host-ip>:18765/monitor で見られるようにする。
+      # コンテナは TTY を持たないので、これを付けないと監視データ自体が集まらない。
+      # プロキシと同じ無認証ポートに出る点に注意 (DOCKER.md の「ダッシュボード」参照)。
+      CCP_WEB_MONITOR: "1"
     # OpenCode (OpenAI互換) のAPIキー置き場。opencode.env.example を参照。
     # APIキーを compose.yml に直接書かず、gitignore 済みの別ファイルに追い出すため
     # environment: ではなく env_file を使う。

@@ -103,12 +103,17 @@ fn main() -> Result<()> {
                 .build()?;
             match select_serve_mode(std::io::stdout().is_terminal(), no_monitor) {
                 ServeMode::Plain => {
+                    // No TTY means no terminal UI, so nothing would normally
+                    // collect monitor data. The browser monitor needs it, so the
+                    // store is created here when it is switched on — this is the
+                    // path containers take.
+                    let monitor = config::web_monitor_enabled().then(MonitorHandle::default);
                     print_server_banner(&bind_address, effective_port, &registry);
                     runtime
                         .block_on(server::serve(ServerConfig {
                             bind_address,
                             port: effective_port,
-                            monitor: None,
+                            monitor,
                         }))
                         .map_err(|err| anyhow::anyhow!(err))
                 }
@@ -268,6 +273,9 @@ fn listen_url(bind_address: &str, port: u16) -> String {
 
 fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     println!("Proxy listening on {}", listen_url(bind_address, port));
+    if config::web_monitor_enabled() {
+        println!("Monitor: {}/monitor", listen_url(bind_address, port));
+    }
     println!("Logs: {}", paths::log_file().display());
     let cfg = paths::config_dir();
     if cfg.exists() {

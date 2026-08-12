@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>claude-code-proxy monitor</title>
+    <style>
+      :root {
+        /* Mirrors BG / WHITE / RED / YELLOW in src/tui.rs. */
+        --bg: #121216;
+        --fg: #f0f4f8;
+        --red: #dc7878;
+        --yellow: #dcc864;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--fg);
+        overflow: hidden;
+      }
+      #screen,
+      #ruler {
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "DejaVu Sans Mono", monospace;
+        font-size: 13px;
+        line-height: 1.2;
+        white-space: pre;
+        tab-size: 8;
+      }
+      #screen {
+        margin: 0;
+        padding: 4px 6px;
+      }
+      /* Off-screen probe used to measure one character cell. */
+      #ruler {
+        position: absolute;
+        visibility: hidden;
+        top: -9999px;
+        left: -9999px;
+        white-space: pre;
+      }
+      #status {
+        position: fixed;
+        top: 8px;
+        right: 12px;
+        padding: 3px 10px;
+        border-radius: 10px;
+        font: 600 11px/1.6 ui-sans-serif, system-ui, sans-serif;
+        background: var(--yellow);
+        color: #1a1a1a;
+      }
+      #status[hidden] {
+        display: none;
+      }
+      #status.error {
+        background: var(--red);
+        color: #fff;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">connecting…</div>
+    <span id="ruler">MMMMMMMMMMMMMMMMMMMM</span>
+    <pre id="screen"></pre>
+
+    <script>
+      (function () {
+        const screen = document.getElementById("screen");
+        const ruler = document.getElementById("ruler");
+        const status = document.getElementById("status");
+
+        const PADDING_X = 12; // #screen horizontal padding, both sides
+        const PADDING_Y = 8;
+        const MIN_COLS = 40;
+        const MAX_COLS = 400;
+        const MIN_ROWS = 10;
+        const MAX_ROWS = 200;
+
+        let source = null;
+        let current = "";
+
+        function clamp(value, low, high) {
+          return Math.max(low, Math.min(high, value));
+        }
+
+        // The server renders a fixed character grid, so the viewport has to be
+        // translated into cells before asking for a frame.
+        function gridSize() {
+          const box = ruler.getBoundingClientRect();
+          const cellWidth = box.width / ruler.textContent.length;
+          const cellHeight = box.height;
+          const cols = Math.floor(
+            (window.innerWidth - PADDING_X) / (cellWidth || 8),
+          );
+          const rows = Math.floor(
+            (window.innerHeight - PADDING_Y) / (cellHeight || 16),
+          );
+          return {
+            cols: clamp(cols, MIN_COLS, MAX_COLS),
+            rows: clamp(rows, MIN_ROWS, MAX_ROWS),
+          };
+        }
+
+        function setStatus(text, isError) {
+          if (!text) {
+            status.hidden = true;
+            return;
+          }
+          status.hidden = false;
+          status.textContent = text;
+          status.classList.toggle("error", Boolean(isError));
+        }
+
+        function connect() {
+          if (source) {
+            source.close();
+          }
+          const size = gridSize();
+          current = size.cols + "x" + size.rows;
+          source = new EventSource(
+            "/monitor/stream?cols=" + size.cols + "&rows=" + size.rows,
+          );
+
+          source.addEventListener("frame", function (event) {
+            let frame;
+            try {
+              frame = JSON.parse(event.data);
+            } catch (err) {
+              return;
+            }
+            // The payload is built from escaped cell text on the server, so no
+            // caller-supplied markup can reach the DOM here.
+            screen.innerHTML = frame.html;
+            setStatus(null);
+          });
+
+          source.onopen = function () {
+            setStatus(null);
+          };
+
+          // EventSource reconnects on its own; the badge just says so.
+          source.onerror = function () {
+            setStatus("reconnecting…", true);
+          };
+        }
+
+        let resizeTimer = null;
+        window.addEventListener("resize", function () {
+          window.clearTimeout(resizeTimer);
+          resizeTimer = window.setTimeout(function () {
+            const size = gridSize();
+            if (size.cols + "x" + size.rows !== current) {
+              connect();
+            }
+          }, 200);
+        });
+
+        connect();
+      })();
+    </script>
+  </body>
+</html>
